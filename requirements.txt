@@ -1,0 +1,7 @@
+# common
+torch>=2
+torchvision
+# da3
+xformers
+# others
+supervision>=0.18.0 # 用于标注和可视化
