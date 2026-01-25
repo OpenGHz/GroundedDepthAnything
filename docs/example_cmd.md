@@ -70,3 +70,25 @@ conda run -n dinov3 python -m gda.modules.object_segmentation \
 
 备注：
 - SAM3 的 HuggingFace 权重仓库是 gated，若你没有权限/未登录，会拉取失败；此时请提供本地 checkpoint 或完成 HF 登录。
+
+## 4) 主流程（深度 + 检测 + 分割）
+
+- 输入一张图 + 提示词，输出深度图与分割结果（默认 SAM2，本地权重）：
+
+```bash
+conda run -n dinov3 python -m gda.gda \
+  --image images/test.jpg \
+  --prompts "cat,dog,car" \
+  --output_dir outputs/gda \
+  --device cpu
+```
+
+输出（默认文件名）：
+- `outputs/gda/depth.npy`
+- `outputs/gda/depth.png`
+- `outputs/gda/detections.json`
+- `outputs/gda/detections_vis.png`
+- `outputs/gda/masks.npz`
+- `outputs/gda/masks_vis.png`
+- `outputs/gda/masks_meta.json`
+- `outputs/gda/depth_with_masks.png`
