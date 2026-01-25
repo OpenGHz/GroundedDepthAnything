@@ -112,6 +112,17 @@ conda run -n dinov3 python -m gda.modules.position_representation \
 
 - 你需要提供相机内参（像素单位）：`fx, fy, cx, cy`。
 
+也可以把内参写入一个 `K.json`（两种格式都支持：`{K:[[...]]}` 或 `{fx,fy,cx,cy}`）。例如：
+
+```json
+{
+  "fx": 500.0,
+  "fy": 500.0,
+  "cx": 320.0,
+  "cy": 240.0
+}
+```
+
 ```bash
 conda run -n dinov3 python -m gda.modules.pointcloud_generation \
   --depth_npy outputs/gda/depth.npy \
@@ -119,6 +130,18 @@ conda run -n dinov3 python -m gda.modules.pointcloud_generation \
   --masks_npz outputs/gda/masks.npz \
   --positions_npz outputs/post/positions.npz \
   --fx 500 --fy 500 --cx 320 --cy 240 \
+  --output_dir outputs/post
+```
+
+- 或使用 `--k_file`：
+
+```bash
+conda run -n dinov3 python -m gda.modules.pointcloud_generation \
+  --depth_npy outputs/gda/depth.npy \
+  --image images/test.jpg \
+  --masks_npz outputs/gda/masks.npz \
+  --positions_npz outputs/post/positions.npz \
+  --k_file K.json \
   --output_dir outputs/post
 ```
 
