@@ -276,3 +276,130 @@ Config（继承 `pydantic.BaseModel`）：
 - 输出格式稳定性：
   - CLI 输出尽量固定文件名（例如 `depth.npy`、`masks.npz`），方便下游脚本串联。
 
+---
+
+## 7. 后处理模块（位置表示 / 点云生成 / 点云可视化）
+
+你提出的 3 个后处理模块方向是合理的；我建议在接口上补充两点约束，这样后续扩展会更稳：
+
+1) **深度/Mask/图像分辨率必须对齐**
+- Depth-Anything-3 的深度输出可能不是原图分辨率（我们在主流程里也遇到过）。
+- 因此后处理模块要明确：输入的 `depth` 与 `masks` 是否同一分辨率；若不同，需要在进入模块前对齐（推荐：把深度 resize 到 mask/原图大小，并记录缩放信息）。
+
+2) **相机内参数据结构要固定**
+- 推荐统一用 `K: np.ndarray`，shape `[3, 3]`，float64/float32。
+- 同时明确坐标系约定（OpenCV 常用）：
+  - 像素坐标 `(u, v)` 对应 `x=u, y=v`
+  - 相机坐标：`X = (u - cx)/fx * Z`，`Y = (v - cy)/fy * Z`，`Z = depth`
+
+下面给出各模块的实现思路（按 prompts/prepare.md 约束：类仅接收一个 `config: BaseModel`，脚本 CLI 用 `pydantic_settings`）。
+
+### 7.1 位置表示模块（Mask -> 单点代表）
+
+**目标**：在每个 mask 的深度区域中，选择“深度中值”代表该区域的唯一空间表示。
+
+建议的“深度中值点”定义（更可复现且鲁棒）：
+- 在 mask 内取所有有效深度值集合 $D$（过滤 `nan/inf/<=0`，必要时再加深度上下界）。
+- 计算中值 $m = \mathrm{median}(D)$。
+- 在 mask 内找到深度值最接近 $m$ 的像素点 $(u,v)$ 作为代表点。
+- 若存在多个并列点，建议用“离 mask 质心最近”作为 tie-break（避免挑到边缘）。
+
+Config（继承 `pydantic.BaseModel`）建议字段：
+- `min_depth: float = 1e-6`
+- `max_depth: float | None = None`
+- `erode_kernel: int = 0`（可选，>0 时对 mask 做一次腐蚀后再取点，减少边缘噪声）
+
+类接口建议：
+
+- 类名：`MaskPositionRepresentor`
+- 核心方法：
+  - `represent(depth: np.ndarray, masks: np.ndarray, prompt_ids: np.ndarray | None = None) -> dict`
+    - 输入：
+      - `depth`: `np.ndarray`，shape `[H, W]`，float32/float64
+      - `masks`: `np.ndarray`，shape `[N, H, W]`，bool/uint8
+      - `prompt_ids`（可选）：shape `[N]`，int32
+    - 输出（JSON 可序列化 dict，或 npz）：
+      - `rep_uv: np.ndarray`，shape `[N, 2]`，int32，(u, v)
+      - `rep_depth: np.ndarray`，shape `[N]`，float32
+      - `valid: np.ndarray`，shape `[N]`，bool（mask 内无有效深度时为 False，`rep_uv=-1`）
+      - `prompt_ids` 原样透传（可选）
+
+CLI 脚本约定（建议新文件）：
+- `--depth_npy`（或 `--depth`）
+- `--masks_npz`
+- `--output_dir`（可选；默认同输入）
+
+输出建议：
+- `positions.json` 或 `positions.npz`
+
+### 7.2 点云生成模块（Depth/RGB/K -> PointCloud）
+
+**目标**：从深度图生成点云；可选按 RGB 上色；可选按 masks 过滤/打标签；可选把“位置表示点”映射到点云索引。
+
+实现思路（推荐库与方式）：
+- 纯 numpy 也能做，但为了后续可视化/保存更方便，建议使用 `open3d`（用于点云数据结构/导出/显示）。
+- 若环境缺少 `open3d`，按 prepare.md 规则：直接 `pip install open3d`。
+
+Config（继承 `pydantic.BaseModel`）建议字段：
+- `depth_scale: float = 1.0`（若深度是米就保持 1；若是 mm 则设为 1000）
+- `max_points: int | None = None`（可选，下采样上限）
+- `mask_mode: Literal["all", "union", "per_mask"] = "all"`
+
+类接口建议：
+
+- 类名：`PointCloudGenerator`
+- 核心方法：
+  - `generate(depth: np.ndarray, K: np.ndarray, rgb: np.ndarray | None = None, masks: np.ndarray | None = None, rep_uv: np.ndarray | None = None) -> dict`
+    - 输入：
+      - `depth`: `[H, W]`
+      - `K`: `[3, 3]`
+      - `rgb`（可选）：`[H, W, 3]`，uint8，RGB 或 BGR（需要在 config/文档里固定一种）
+      - `masks`（可选）：`[N, H, W]` bool
+      - `rep_uv`（可选）：`[N, 2]`，int32
+    - 输出：
+      - `points_xyz: np.ndarray`，shape `[M, 3]`，float32
+      - `colors_rgb: np.ndarray | None`，shape `[M, 3]`，uint8（或 float32 0..1）
+      - `pixel_uv: np.ndarray`，shape `[M, 2]`，int32（用于后续索引/反查）
+      - `mask_ids: np.ndarray | None`，shape `[M]`，int32（若开启按 mask 输出/打标签）
+      - `rep_point_indices: np.ndarray | None`，shape `[N]`，int32（`rep_uv[i]` 在点云里的索引；找不到则 -1）
+
+CLI 脚本约定（建议新文件）：
+- `--depth_npy`
+- `--image`（可选，用于颜色）
+- `--K_json` 或 `--K_npy`（内参输入）
+- `--masks_npz`（可选）
+- `--positions_json/npz`（可选）
+- `--output_dir`
+
+输出建议：
+- `pointcloud.npz`（points/colors/pixel_uv/mask_ids/rep_point_indices）
+- 可选：`pointcloud.ply`（便于外部工具查看）
+
+### 7.3 点云可视化模块（交互式 GUI）
+
+**目标**：可交互查看点云；若提供位置表示索引，需要“显著”标出这些点。
+
+实现思路（推荐）：
+- 用 `open3d.visualization`：
+  - 主点云：正常点大小 + 原色
+  - 位置表示点：单独作为一个点云或用 sphere mesh（更醒目），颜色用高对比（例如纯红/纯黄），并把点大小调大
+
+Config（继承 `pydantic.BaseModel`）建议字段：
+- `point_size: int = 2`
+- `rep_point_size: int = 10`
+- `rep_color: tuple[int, int, int] = (255, 0, 0)`
+
+类接口建议：
+
+- 类名：`PointCloudVisualizer`
+- 核心方法：
+  - `show(points_xyz: np.ndarray, colors_rgb: np.ndarray | None = None, rep_point_indices: np.ndarray | None = None) -> None`
+    - 输出：弹出可交互 GUI（拖动/缩放）
+
+CLI 脚本约定（建议新文件）：
+- `--pointcloud_npz`（或 `--points_npy` + `--colors_npy`）
+- `--rep_indices_npy`（可选）
+
+输出：
+- 按你的要求，主要输出是交互式 GUI（可选提供 `--screenshot` 保存截图，便于记录）。
+
