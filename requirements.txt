@@ -5,3 +5,6 @@ torchvision
 xformers
 # others
 supervision>=0.18.0 # 用于标注和可视化
+
+# post-processing
+open3d>=0.19.0

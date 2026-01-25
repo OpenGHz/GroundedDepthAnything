@@ -92,3 +92,49 @@ conda run -n dinov3 python -m gda.gda \
 - `outputs/gda/masks_vis.png`
 - `outputs/gda/masks_meta.json`
 - `outputs/gda/depth_with_masks.png`
+
+## 5) 后处理：位置表示（mask -> 代表点）
+
+- 基于 `depth.npy` + `masks.npz`，为每个 mask 选择一个代表像素点（mask 内深度中值附近的像素）：
+
+```bash
+conda run -n dinov3 python -m gda.modules.position_representation \
+  --depth_npy outputs/gda/depth.npy \
+  --masks_npz outputs/gda/masks.npz \
+  --output_dir outputs/post
+```
+
+输出：
+- `outputs/post/positions.npz`
+- `outputs/post/positions.json`
+
+## 6) 后处理：点云生成（depth + K (+rgb/+masks) -> pointcloud）
+
+- 你需要提供相机内参（像素单位）：`fx, fy, cx, cy`。
+
+```bash
+conda run -n dinov3 python -m gda.modules.pointcloud_generation \
+  --depth_npy outputs/gda/depth.npy \
+  --image images/test.jpg \
+  --masks_npz outputs/gda/masks.npz \
+  --positions_npz outputs/post/positions.npz \
+  --fx 500 --fy 500 --cx 320 --cy 240 \
+  --output_dir outputs/post
+```
+
+输出：
+- `outputs/post/pointcloud.npz`
+- `outputs/post/pointcloud.ply`（默认开启，便于快速查看）
+
+备注：
+- 如果 `depth.npy` 与 `image/masks` 分辨率不同，会自动 resize 到目标尺寸（优先 masks，其次 image，否则 depth）。
+
+## 7) 后处理：点云可视化（Open3D GUI）
+
+```bash
+conda run -n dinov3 python -m gda.modules.pointcloud_visualization \
+  --pointcloud_npz outputs/post/pointcloud.npz
+```
+
+备注：
+- 这是 GUI 交互窗口；在无显示环境下需要 X11 forwarding 或本地桌面。
