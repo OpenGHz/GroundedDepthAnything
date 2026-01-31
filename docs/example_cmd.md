@@ -161,3 +161,50 @@ conda run -n dinov3 python -m gda.modules.pointcloud_visualization \
 
 备注：
 - 这是 GUI 交互窗口；在无显示环境下需要 X11 forwarding 或本地桌面。
+
+## 8) 一体化：image -> positions（可选 pointcloud / 可选可视化）
+
+- 输入一张图 + 提示词，直接输出每个 mask 的代表点。
+
+```bash
+conda run -n dinov3 python -m gda.image_to_positions \
+  --image images/test.jpg \
+  --prompts "cat,dog,car" \
+  --output_dir outputs/image_to_positions \
+  --device cpu
+```
+
+输出（固定会写）：
+- `outputs/image_to_positions/positions.npz`
+- `outputs/image_to_positions/positions.json`
+
+可选：只保留 positions（不保存中间产物）：
+
+```bash
+conda run -n dinov3 python -m gda.image_to_positions \
+  --image images/test.jpg \
+  --prompts "cat,dog,car" \
+  --output_dir outputs/image_to_positions \
+  --device cpu \
+  --save_intermediate false
+```
+
+可选：生成 pointcloud 并打开 GUI 可视化（需要 Open3D + 有显示环境）：
+
+```bash
+conda run -n dinov3 python -m gda.image_to_positions \
+  --image images/test.jpg \
+  --prompts "cat,dog,car" \
+  --output_dir outputs/image_to_positions \
+  --device cpu \
+  --make_pointcloud true \
+  --k_file K.json \
+  --visualize_pointcloud true \
+  --visualize_seconds 10
+
+注：不设置 `--visualize_seconds` 时，Open3D 窗口会一直阻塞直到手动关闭。
+```
+
+输出（若启用 pointcloud）：
+- `outputs/image_to_positions/pointcloud.npz`
+- `outputs/image_to_positions/pointcloud.ply`（默认开启）

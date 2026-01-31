@@ -16,6 +16,7 @@ Notes:
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,7 @@ class PointCloudVisualizationConfig(BaseModel):
     point_size: float = 2.0
     rep_sphere_radius: float = 0.02
     show_axes: bool = True
+    timeout_sec: float | None = None
 
 
 class PointCloudVisualizer:
@@ -83,7 +85,14 @@ class PointCloudVisualizer:
         opt = vis.get_render_option()
         if opt is not None:
             opt.point_size = float(self.config.point_size)
-        vis.run()
+        if self.config.timeout_sec is None:
+            vis.run()
+        else:
+            end_t = time.time() + float(self.config.timeout_sec)
+            while time.time() < end_t:
+                vis.poll_events()
+                vis.update_renderer()
+                time.sleep(0.01)
         vis.destroy_window()
 
 
@@ -95,6 +104,7 @@ class PointCloudVisualizationCLI(BaseSettings):
     point_size: float = 2.0
     rep_sphere_radius: float = 0.02
     show_axes: bool = True
+    timeout_sec: float | None = None
 
 
 def main() -> None:
@@ -115,6 +125,7 @@ def main() -> None:
             point_size=args.point_size,
             rep_sphere_radius=args.rep_sphere_radius,
             show_axes=args.show_axes,
+            timeout_sec=args.timeout_sec,
         )
     )
     vis.visualize(points_xyz=points, colors=colors, rep_point_indices=rep_idx)

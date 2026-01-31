@@ -11,13 +11,16 @@ Outputs:
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 from pathlib import Path
 from typing import Literal
 
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -43,6 +46,7 @@ class DepthEstimationConfig(BaseModel):
     model_name: str = "depth-anything/DA3-LARGE"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     colormap: Literal["turbo", "inferno", "magma", "viridis", "jet"] = "turbo"
+    hf_local_files_only: bool = False
 
 
 class DepthEstimatorDA3:
@@ -57,30 +61,54 @@ class DepthEstimatorDA3:
 
         self.config = config
         self.device = torch.device(config.device)
-        self.model = DepthAnything3.from_pretrained(config.model_name).to(self.device)
+
+        logger = logging.getLogger("gda.depth")
+        t0 = time.perf_counter()
+        logger.info("loading DA3 model=%s device=%s", config.model_name, config.device)
+        self.model = DepthAnything3.from_pretrained(
+            config.model_name,
+            local_files_only=bool(config.hf_local_files_only),
+        ).to(self.device)
+        logger.info("DA3 loaded in %.2fs", time.perf_counter() - t0)
 
     @torch.no_grad()
-    def predict(self, image_path: str | Path) -> np.ndarray:
+    def predict(self, image_rgb: np.ndarray | Image.Image) -> np.ndarray:
         """Predict a depth map for a single image.
 
         Args:
-            image_path: Path to an image file.
+            image_rgb: Input image as RGB (numpy uint8 array [H,W,3] or PIL Image).
 
         Returns:
             Depth map as float32 numpy array with shape [H, W].
         """
 
-        image_path = Path(image_path)
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
+        if isinstance(image_rgb, Image.Image):
+            image_in: np.ndarray | Image.Image = image_rgb.convert("RGB")
+        else:
+            arr = np.asarray(image_rgb)
+            if arr.ndim != 3 or arr.shape[2] != 3:
+                raise ValueError(f"image_rgb must have shape [H,W,3], got {arr.shape}")
+            if arr.dtype != np.uint8:
+                arr = arr.astype(np.uint8)
+            image_in = arr
 
         prediction = self.model.inference(
-            [str(image_path)],
+            [image_in],
             export_format="mini_npz",
             export_dir=None,
         )
         depth = np.asarray(prediction.depth[0], dtype=np.float32)
         return depth
+
+    @torch.no_grad()
+    def predict_from_path(self, image_path: str | Path) -> np.ndarray:
+        """Backward-compatible helper: load image from path then call predict()."""
+
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        image = Image.open(image_path).convert("RGB")
+        return self.predict(image)
 
     def colorize(self, depth: np.ndarray) -> np.ndarray:
         """Convert a depth map into a colorized visualization.
@@ -158,7 +186,8 @@ def main() -> None:
         )
     )
 
-    depth = estimator.predict(args.image)
+    image = Image.open(args.image).convert("RGB")
+    depth = estimator.predict(image)
 
     if args.save_npy:
         np.save(out_dir / "depth.npy", depth)

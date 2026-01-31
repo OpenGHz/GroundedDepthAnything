@@ -35,6 +35,8 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from gda.datatypes import PositionsResult
+
 
 class PositionRepresentationConfig(BaseModel):
     """Configuration for position representation."""
@@ -62,7 +64,7 @@ class MaskPositionRepresentor:
         masks: np.ndarray,
         prompts: list[str] | None = None,
         prompt_ids: list[int] | None = None,
-    ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> PositionsResult:
         """Compute representative points.
 
         Args:
@@ -132,7 +134,7 @@ class MaskPositionRepresentor:
         if prompt_ids is not None:
             meta["prompt_ids"] = prompt_ids
 
-        return meta, rep_uvs, rep_depths, valids
+        return PositionsResult(meta=meta, rep_uvs=rep_uvs, rep_depths=rep_depths, valids=valids)
 
 
 class PositionRepresentationCLI(BaseSettings):
@@ -188,7 +190,7 @@ def main() -> None:
     representor = MaskPositionRepresentor(
         PositionRepresentationConfig(min_depth=args.min_depth, max_depth=args.max_depth)
     )
-    meta, rep_uvs, rep_depths, valids = representor.compute(
+    result = representor.compute(
         depth=depth,
         masks=masks,
         prompts=prompts,
@@ -197,20 +199,20 @@ def main() -> None:
 
     np.savez_compressed(
         out_dir / "positions.npz",
-        rep_uvs=rep_uvs,
-        rep_depths=rep_depths,
-        valids=valids,
-        meta=json.dumps(meta, ensure_ascii=False),
+        rep_uvs=result.rep_uvs,
+        rep_depths=result.rep_depths,
+        valids=result.valids,
+        meta=json.dumps(result.meta, ensure_ascii=False),
     )
 
     per_mask: list[dict] = []
-    for i in range(int(meta["num_masks"])):
+    for i in range(int(result.meta["num_masks"])):
         item = {
             "mask_index": i,
-            "valid": bool(valids[i]),
-            "rep_uv": rep_uvs[i].tolist(),
-            "rep_depth": float(rep_depths[i]) if np.isfinite(rep_depths[i]) else None,
-            "num_valid": int(meta["num_valid"][i]),
+            "valid": bool(result.valids[i]),
+            "rep_uv": result.rep_uvs[i].tolist(),
+            "rep_depth": float(result.rep_depths[i]) if np.isfinite(result.rep_depths[i]) else None,
+            "num_valid": int(result.meta["num_valid"][i]),
         }
         if prompt_ids is not None and i < len(prompt_ids):
             item["prompt_id"] = int(prompt_ids[i])
@@ -219,7 +221,7 @@ def main() -> None:
         per_mask.append(item)
 
     (out_dir / "positions.json").write_text(
-        json.dumps({"meta": meta, "items": per_mask}, ensure_ascii=False, indent=2),
+        json.dumps({"meta": result.meta, "items": per_mask}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 

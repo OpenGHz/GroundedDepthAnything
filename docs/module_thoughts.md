@@ -78,7 +78,7 @@
 来源：sdf_compute 的深度推理在 process_sdf.py 里已经使用 Depth-Anything-3：
 - `from depth_anything_3.api import DepthAnything3`
 - `model = DepthAnything3.from_pretrained(model_name)`
-- `prediction = model.inference([image_path], export_format=..., export_dir=None)`
+- `prediction = model.inference([image_rgb_or_pil], export_format=..., export_dir=None)`
 
 ### 2.2 类接口建议
 
@@ -236,8 +236,10 @@ Config（继承 `pydantic.BaseModel`）：
 
 核心方法：
 
-- `run(image: numpy.ndarray | str, prompts: list[str]) -> tuple[numpy.ndarray, SegmentationResult]`
+- `process(image_rgb: numpy.ndarray, prompts: list[str]) -> tuple[numpy.ndarray, SegmentationResult]`
   - 输出：`(depth, seg)`
+
+兼容性（可选）：保留 `run(image_path: str, prompts: list[str])` 作为封装，仅用于 CLI/脚本便捷调用；pipeline 拼接与模块调用统一使用内存数据（不依赖临时文件）。
 
 可选：输出“带分割结果的深度图”
 - 方式 A：在深度可视化图上叠加 mask（更直观）
@@ -269,9 +271,15 @@ Config（继承 `pydantic.BaseModel`）：
 - 输出目录默认策略（按约束）：
   - `output_dir = Path(image).parent`（当 `--output_dir` 未提供时）
 
+- 数据接口约定（重要）：
+  - 统一约定模块/主流程在 Python API 层的图像输入为 `image_rgb: np.ndarray`，shape `[H, W, 3]`，`dtype=uint8`，颜色空间 **RGB**。
+  - 深度图为 `depth: np.ndarray`，shape `[H, W]`，float32/float64 均可（内部会转 float32）。
+  - masks 为 `masks: np.ndarray`，shape `[N, H, W]`，bool 或 0/1 数组（内部会转 bool）。
+
 - 颜色空间：
-  - opencv 读图是 BGR；Transformers Processor 通常吃 RGB/PIL。
-  - 建议检测/分割入口都接受路径，内部统一用 PIL 走一遍，减少颜色错误。
+  - OpenCV 常见读图为 BGR；PIL/Transformers 通常使用 RGB。
+  - 如果上游用 OpenCV 读图得到 `image_bgr`，需要先转换：`image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)`。
+  - CLI 层可以继续接受文件路径（`--image`），但应在 CLI 内部读图并转换为上述 `image_rgb` 后，再调用模块方法。
 
 - 输出格式稳定性：
   - CLI 输出尽量固定文件名（例如 `depth.npy`、`masks.npz`），方便下游脚本串联。
@@ -426,3 +434,79 @@ CLI 脚本约定（建议新文件）：
 输出：
 - 按你的要求，主要输出是交互式 GUI（可选提供 `--screenshot` 保存截图，便于记录）。
 
+---
+
+## 8. 一体化模块（主流程 + 后处理）
+
+目标：把“深度 + 检测 + 分割”与“位置表示 + 点云生成 (+可视化)”串成一个可复现 CLI，同时保持内部模块可复用（新模块主要负责 orchestrate）。
+
+### 8.1 模块边界与复用关系
+
+- 新模块只做编排，不重复实现模型推理逻辑。
+- 内部复用：
+  - 主流程：`ImageDepthAndSegPipeline`
+  - 位置表示：`MaskPositionRepresentor`
+  - 点云生成：`PointCloudGenerator`
+  - 点云可视化（可选）：`PointCloudVisualizer`
+
+### 8.2 Config 结构（按约束：类初始化只收一个 config）
+
+建议新增 `ImageToPointCloudPipelineConfig(BaseModel)`，采用嵌套 config：
+
+- `pipeline: PipelineConfig`（深度/检测/分割）
+- `pos: PositionRepresentationConfig`（位置表示）
+- `pc: PointCloudGenerationConfig`（点云生成）
+- `viz: PointCloudVisualizationConfig`（点云可视化，可选）
+
+对应一体化类：
+
+- `class ImageToPointCloudPipeline:`
+  - `def __init__(self, config: ImageToPointCloudPipelineConfig): ...`
+
+### 8.3 CLI 参数建议（pydantic_settings）
+
+输入：
+- `--image`：输入图片
+- `--prompts`：提示词（与主流程一致；内部解析成 `List[str]`）
+- `--output_dir`：可选；默认 `Path(image).parent`
+
+相机内参（K）：二选一
+- `--k_file`：`.json/.npy`（推荐；格式见第 7 节补充）
+- 或：`--fx/--fy/--cx/--cy`
+
+行为开关建议：
+- `--save_intermediate true/false`：是否保存 depth/det/masks/positions 等中间产物（默认 true，便于调试复现）
+- `--save_ply true/false`：是否输出 `pointcloud.ply`（默认 true）
+- `--visualize true/false`：是否启动 Open3D GUI（默认 false，避免无显示环境阻塞）
+
+### 8.4 统一 I/O（默认输出文件名）
+
+建议输出目录下固定：
+
+- 主流程产物：
+  - `depth.npy`, `depth.png`
+  - `detections.json`, `detections_vis.png`
+  - `masks.npz`, `masks_vis.png`, `masks_meta.json`
+  - `depth_with_masks.png`
+- 后处理产物：
+  - `positions.npz`, `positions.json`
+  - `pointcloud.npz`, `pointcloud.ply`（可选）
+
+### 8.5 分辨率对齐策略（避免 K 错配）
+
+建议将“分割输出 masks 的分辨率”作为 canonical size（通常等于输入图分辨率），并遵循：
+
+- `masks` 使用该 canonical size
+- `depth` 若与 masks 不一致：在进入后处理前 resize 到 canonical size（只影响后处理/点云）
+- `rgb` 使用输入图（应与 canonical size 一致）
+
+内参 K 的约束：
+- 默认认为 K 对应 canonical size。
+- 若未来引入“统一 resize 输入图再推理”的策略，则必须同步缩放 K（`fx, fy, cx, cy` 乘以相同 scale）。
+
+### 8.6 建议的一体化执行顺序
+
+1) 跑主流程：得到 `depth, detections, masks`
+2) 位置表示：`depth + masks -> positions`
+3) 点云生成：`depth + K + (rgb) + (masks) + (positions) -> pointcloud`
+4) （可选）可视化：打开 Open3D

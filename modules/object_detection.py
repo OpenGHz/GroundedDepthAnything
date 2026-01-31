@@ -9,10 +9,13 @@ The detector takes an image and multi-target prompts, and returns boxes.
 
 from __future__ import annotations
 
+import logging
 import json
 import re
 from pathlib import Path
 from typing import Any
+
+import time
 
 import numpy as np
 import torch
@@ -20,6 +23,8 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+
+from gda.datatypes import DetectionResult
 
 
 class ObjectDetectionConfig(BaseModel):
@@ -31,6 +36,7 @@ class ObjectDetectionConfig(BaseModel):
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
     box_threshold: float = 0.25
     text_threshold: float = 0.3
+    hf_local_files_only: bool = False
 
 
 class GroundingDinoDetector:
@@ -45,19 +51,34 @@ class GroundingDinoDetector:
 
         self.config = config
         self.device = torch.device(config.device)
-        self.processor = AutoProcessor.from_pretrained(config.model_id)
+
+        logger = logging.getLogger("gda.det")
+        logger.info("loading GroundingDINO processor=%s", config.model_id)
+        t0 = time.perf_counter()
+        self.processor = AutoProcessor.from_pretrained(
+            config.model_id,
+            local_files_only=bool(config.hf_local_files_only),
+        )
+        logger.info("processor loaded in %.2fs", time.perf_counter() - t0)
+
+        logger.info("loading GroundingDINO model=%s device=%s", config.model_id, config.device)
+        t0 = time.perf_counter()
         self.model = (
-            AutoModelForZeroShotObjectDetection.from_pretrained(config.model_id)
+            AutoModelForZeroShotObjectDetection.from_pretrained(
+                config.model_id,
+                local_files_only=bool(config.hf_local_files_only),
+            )
             .to(self.device)
             .eval()
         )
+        logger.info("model loaded in %.2fs", time.perf_counter() - t0)
 
     @torch.no_grad()
-    def detect(self, image_path: str | Path, prompts: list[str]) -> dict[str, Any]:
+    def detect(self, image_rgb: np.ndarray | Image.Image, prompts: list[str]) -> DetectionResult:
         """Run detection on a single image.
 
         Args:
-            image_path: Path to an image.
+            image_rgb: Input image as RGB (numpy uint8 array [H,W,3] or PIL Image).
             prompts: List of target prompts (multi-target).
 
         Returns:
@@ -70,13 +91,18 @@ class GroundingDinoDetector:
               - labels: list[str] (N) raw labels returned by model
         """
 
-        image_path = Path(image_path)
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
         if not prompts:
             raise ValueError("prompts must be non-empty")
 
-        image = Image.open(image_path).convert("RGB")
+        if isinstance(image_rgb, Image.Image):
+            image = image_rgb.convert("RGB")
+        else:
+            arr = np.asarray(image_rgb)
+            if arr.ndim != 3 or arr.shape[2] != 3:
+                raise ValueError(f"image_rgb must have shape [H,W,3], got {arr.shape}")
+            if arr.dtype != np.uint8:
+                arr = arr.astype(np.uint8)
+            image = Image.fromarray(arr, mode="RGB")
         w, h = image.size
 
         text = ". ".join([p.strip() for p in prompts if p.strip()])
@@ -121,14 +147,24 @@ class GroundingDinoDetector:
                         break
             prompt_ids.append(pid)
 
-        return {
-            "image_size": [h, w],
-            "prompts": prompts,
-            "boxes_xyxy": boxes_np.tolist(),
-            "scores": scores_np.tolist(),
-            "prompt_ids": prompt_ids,
-            "labels": labels_list,
-        }
+        return DetectionResult(
+            image_size=(int(h), int(w)),
+            prompts=list(prompts),
+            boxes_xyxy=boxes_np,
+            scores=scores_np,
+            prompt_ids=np.asarray(prompt_ids, dtype=np.int32),
+            labels=labels_list,
+        )
+
+    @torch.no_grad()
+    def detect_from_path(self, image_path: str | Path, prompts: list[str]) -> DetectionResult:
+        """Backward-compatible helper: load image from path then call detect()."""
+
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        image = Image.open(image_path).convert("RGB")
+        return self.detect(image, prompts)
 
 
 class ObjectDetectionCLI(BaseSettings):
@@ -180,10 +216,16 @@ def _draw_boxes(image: Image.Image, det: dict[str, Any]) -> Image.Image:
     except Exception:
         font = None
 
-    boxes = det["boxes_xyxy"]
-    scores = det["scores"]
-    prompt_ids = det["prompt_ids"]
-    prompts = det["prompts"]
+    if isinstance(det, DetectionResult):
+        boxes = det.boxes_xyxy.tolist()
+        scores = det.scores.tolist()
+        prompt_ids = det.prompt_ids.tolist()
+        prompts = det.prompts
+    else:
+        boxes = det["boxes_xyxy"]
+        scores = det["scores"]
+        prompt_ids = det["prompt_ids"]
+        prompts = det["prompts"]
 
     palette = [
         (230, 25, 75),
@@ -236,13 +278,13 @@ def main() -> None:
         )
     )
 
-    det = detector.detect(args.image, prompts_list)
+    image = Image.open(args.image).convert("RGB")
+    det = detector.detect(image, prompts_list)
 
     (out_dir / "detections.json").write_text(
-        json.dumps(det, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(det.to_json_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    image = Image.open(args.image).convert("RGB")
     vis = _draw_boxes(image, det)
     vis.save(out_dir / "detections_vis.png")
 

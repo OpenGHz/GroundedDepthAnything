@@ -40,8 +40,10 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from gda.datatypes import PointCloudResult
 
-def _load_k_from_json(path: Path) -> np.ndarray:
+
+def load_k_from_json(path: Path) -> np.ndarray:
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
         if "K" in data:
@@ -56,7 +58,7 @@ def _load_k_from_json(path: Path) -> np.ndarray:
     raise ValueError("Invalid intrinsics json: expected {K:[[...]]} or {fx,fy,cx,cy}.")
 
 
-def _load_k(k_path: Path) -> np.ndarray:
+def load_k(k_path: Path) -> np.ndarray:
     if not k_path.exists():
         raise FileNotFoundError(f"K file not found: {k_path}")
     if k_path.suffix.lower() in {".npy"}:
@@ -65,7 +67,12 @@ def _load_k(k_path: Path) -> np.ndarray:
             raise ValueError(f"K must be 3x3, got {k.shape}")
         return k
     if k_path.suffix.lower() in {".json"}:
-        return _load_k_from_json(k_path)
+        return load_k_from_json(k_path)
+
+
+    # Backward-compatible aliases
+    _load_k_from_json = load_k_from_json
+    _load_k = load_k
     raise ValueError(f"Unsupported K file extension: {k_path.suffix} (use .npy or .json)")
 
 
@@ -108,7 +115,7 @@ class PointCloudGenerator:
         masks: np.ndarray | None = None,
         rep_uvs: np.ndarray | None = None,
         rep_valids: np.ndarray | None = None,
-    ) -> dict:
+    ) -> PointCloudResult:
         """Generate point cloud arrays."""
 
         fx = float(k[0, 0])
@@ -152,22 +159,24 @@ class PointCloudGenerator:
         y = (v - cy) / fy * z
         points = np.stack([x, y, z], axis=1).astype(np.float32)
 
-        out: dict = {
-            "points_xyz": points,
-            "pixel_uv": np.stack([uu.astype(np.int32), vv.astype(np.int32)], axis=1),
-            "K": k.astype(np.float32),
-            "image_size": np.asarray([h, w], dtype=np.int32),
-        }
+        out = PointCloudResult(
+            points_xyz=points,
+            pixel_uv=np.stack([uu.astype(np.int32), vv.astype(np.int32)], axis=1),
+            K=k.astype(np.float32),
+            image_size=np.asarray([h, w], dtype=np.int32),
+        )
 
+        mask_ids_flat: np.ndarray | None = None
         if mask_ids is not None:
-            out["mask_ids"] = mask_ids[vv, uu].astype(np.int32)
+            mask_ids_flat = mask_ids[vv, uu].astype(np.int32)
 
+        colors: np.ndarray | None = None
         if image_rgb is not None and self.config.include_colors:
             if image_rgb.shape[0] != h or image_rgb.shape[1] != w:
                 raise ValueError("image must already match depth size")
             colors = image_rgb[vv, uu].astype(np.uint8)
-            out["colors"] = colors
 
+        rep_point_indices: np.ndarray | None = None
         if rep_uvs is not None:
             rep_uvs = np.asarray(rep_uvs)
             rep_point_indices = np.full((rep_uvs.shape[0],), -1, dtype=np.int32)
@@ -191,9 +200,15 @@ class PointCloudGenerator:
                 if key in mapping:
                     rep_point_indices[i] = mapping[key]
 
-            out["rep_point_indices"] = rep_point_indices
-
-        return out
+        return PointCloudResult(
+            points_xyz=out.points_xyz,
+            pixel_uv=out.pixel_uv,
+            K=out.K,
+            image_size=out.image_size,
+            mask_ids=mask_ids_flat,
+            colors=colors,
+            rep_point_indices=rep_point_indices,
+        )
 
 
 class PointCloudGenerationCLI(BaseSettings):
@@ -228,7 +243,7 @@ def _resolve_output_dir(input_path: Path, output_dir: Path | None) -> Path:
 
 def _make_k(args: PointCloudGenerationCLI, target_h: int, target_w: int) -> np.ndarray:
     if args.k_file is not None:
-        k = _load_k(args.k_file)
+        k = load_k(args.k_file)
         return k
     if None in (args.fx, args.fy, args.cx, args.cy):
         raise ValueError("Provide either --k_file or all of --fx --fy --cx --cy")
@@ -248,6 +263,31 @@ def _maybe_import_open3d():
         raise ImportError(
             "Open3D is required for saving .ply. Install with: pip install open3d"
         ) from e
+
+
+def save_pointcloud_ply(path: Path, pc: PointCloudResult | dict) -> None:
+    """Save a point cloud dict (from PointCloudGenerator.generate) to a .ply file."""
+
+    if isinstance(pc, PointCloudResult):
+        points_xyz = pc.points_xyz
+        colors_arr = pc.colors
+    else:
+        if "points_xyz" not in pc:
+            raise KeyError("pc missing 'points_xyz'")
+        points_xyz = pc["points_xyz"]
+        colors_arr = pc.get("colors")
+
+    if colors_arr is not None:
+        colors = colors_arr.astype(np.float32) / 255.0
+    else:
+        colors = None
+
+    o3d = _maybe_import_open3d()
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.asarray(points_xyz, dtype=np.float64))
+    if colors is not None:
+        pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+    o3d.io.write_point_cloud(str(path), pcd)
 
 
 def main() -> None:
@@ -331,7 +371,7 @@ def main() -> None:
     )
 
     # Save NPZ
-    npz_kwargs = {k: v for k, v in pc.items()}
+    npz_kwargs = pc.to_npz_dict()
     if masks_meta is not None:
         npz_kwargs["masks_meta"] = json.dumps(masks_meta, ensure_ascii=False)
 
@@ -339,17 +379,7 @@ def main() -> None:
 
     # Save PLY (optional)
     if args.save_ply:
-        if "colors" in pc:
-            colors = pc["colors"].astype(np.float32) / 255.0
-        else:
-            colors = None
-
-        o3d = _maybe_import_open3d()
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pc["points_xyz"].astype(np.float64))
-        if colors is not None:
-            pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
-        o3d.io.write_point_cloud(str(out_dir / "pointcloud.ply"), pcd)
+        save_pointcloud_ply(out_dir / "pointcloud.ply", pc)
 
     print(f"[OK] point cloud saved under: {out_dir}")
 

@@ -21,7 +21,9 @@ Notes:
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +34,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from gda.datatypes import DetectionResult, SegmentationResult
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -119,6 +122,14 @@ class Sam2BoxSegmentor:
         if not config.sam2_checkpoint.exists():
             raise FileNotFoundError(f"SAM2 checkpoint not found: {config.sam2_checkpoint}")
 
+        logger = logging.getLogger("gda.seg")
+        logger.info(
+            "building SAM2 model_cfg=%s ckpt=%s device=%s",
+            config.sam2_model_cfg,
+            config.sam2_checkpoint,
+            config.device,
+        )
+        t0 = time.perf_counter()
         device = config.device
         self.model = build_sam2(
             config.sam2_model_cfg,
@@ -126,13 +137,16 @@ class Sam2BoxSegmentor:
             device=device,
         )
         self.predictor = SAM2ImagePredictor(self.model)
+        logger.info("SAM2 ready in %.2fs", time.perf_counter() - t0)
 
     @torch.no_grad()
-    def segment(self, image_path: str | Path, det: dict[str, Any]) -> tuple[dict[str, Any], np.ndarray]:
+    def segment(
+        self, image_rgb: np.ndarray | Image.Image, det: DetectionResult | dict[str, Any]
+    ) -> SegmentationResult:
         """Generate masks from detection boxes.
 
         Args:
-            image_path: Path to an image.
+            image_rgb: Input image as RGB (numpy uint8 array [H,W,3] or PIL Image).
             det: Detection result dict (from object_detection.py). Must contain:
                 - image_size: [H, W]
                 - prompts: list[str]
@@ -145,21 +159,28 @@ class Sam2BoxSegmentor:
             - masks: boolean numpy array with shape [N, H, W]
         """
 
-        image_path = Path(image_path)
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
-
-        image = Image.open(image_path).convert("RGB")
-        image_np = np.array(image, dtype=np.uint8)
+        if isinstance(image_rgb, Image.Image):
+            image_np = np.array(image_rgb.convert("RGB"), dtype=np.uint8)
+        else:
+            image_np = np.asarray(image_rgb)
+            if image_np.ndim != 3 or image_np.shape[2] != 3:
+                raise ValueError(f"image_rgb must have shape [H,W,3], got {image_np.shape}")
+            if image_np.dtype != np.uint8:
+                image_np = image_np.astype(np.uint8)
         h, w = image_np.shape[:2]
 
-        boxes = np.asarray(det.get("boxes_xyxy", []), dtype=np.float32)
+        if isinstance(det, dict):
+            det_obj = DetectionResult.from_json_dict(det)
+        else:
+            det_obj = det
+
+        boxes = np.asarray(det_obj.boxes_xyxy, dtype=np.float32)
         if boxes.size == 0:
             masks_arr = np.zeros((0, h, w), dtype=bool)
-            scores = []
+            scores_np = np.zeros((0,), dtype=np.float32)
         else:
             if boxes.ndim != 2 or boxes.shape[1] != 4:
-                raise ValueError("det['boxes_xyxy'] must be N x 4")
+                raise ValueError("det.boxes_xyxy must be N x 4")
 
             self.predictor.set_image(image_np)
             masks, scores_np, _ = self.predictor.predict(
@@ -181,18 +202,27 @@ class Sam2BoxSegmentor:
                 scores_np = scores_np[np.arange(scores_np.shape[0]), best]
 
             masks_arr = masks.astype(bool)
-            scores = [float(x) for x in np.asarray(scores_np).reshape(-1).tolist()]
+            scores_np = np.asarray(scores_np).reshape(-1).astype(np.float32)
 
-        meta = {
-            "backend": "sam2",
-            "image_size": [h, w],
-            "prompts": det.get("prompts", []),
-            "boxes_xyxy": det.get("boxes_xyxy", []),
-            "prompt_ids": det.get("prompt_ids", []),
-            "scores": scores,
-            "_masks_shape": list(masks_arr.shape),
-        }
-        return meta, masks_arr
+        return SegmentationResult(
+            backend="sam2",
+            image_size=(int(h), int(w)),
+            prompts=list(det_obj.prompts),
+            boxes_xyxy=np.asarray(det_obj.boxes_xyxy, dtype=np.float32),
+            prompt_ids=np.asarray(det_obj.prompt_ids, dtype=np.int32),
+            scores=scores_np,
+            masks=masks_arr.astype(bool),
+        )
+
+    @torch.no_grad()
+    def segment_from_path(self, image_path: str | Path, det: DetectionResult | dict[str, Any]) -> SegmentationResult:
+        """Backward-compatible helper: load image from path then call segment()."""
+
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        image = Image.open(image_path).convert("RGB")
+        return self.segment(image, det)
 
 
 class Sam3BoxSegmentor:
@@ -206,6 +236,15 @@ class Sam3BoxSegmentor:
         """
 
         self.config = config
+
+        logger = logging.getLogger("gda.seg")
+        logger.info(
+            "building SAM3 checkpoint=%s load_from_hf=%s device=%s",
+            config.sam3_checkpoint,
+            config.sam3_load_from_hf,
+            config.device,
+        )
+        t0 = time.perf_counter()
         build_sam3_image_model = _import_sam3_builder()
 
         self.model = build_sam3_image_model(
@@ -215,17 +254,20 @@ class Sam3BoxSegmentor:
             enable_segmentation=False,
             enable_inst_interactivity=True,
         )
+        logger.info("SAM3 ready in %.2fs", time.perf_counter() - t0)
         predictor = getattr(self.model, "inst_interactive_predictor", None)
         if predictor is None:
             raise RuntimeError("SAM3 model does not expose inst_interactive_predictor")
         self.predictor = predictor
 
     @torch.no_grad()
-    def segment(self, image_path: str | Path, det: dict[str, Any]) -> tuple[dict[str, Any], np.ndarray]:
+    def segment(
+        self, image_rgb: np.ndarray | Image.Image, det: DetectionResult | dict[str, Any]
+    ) -> SegmentationResult:
         """Generate masks from detection boxes using SAM3.
 
         Args:
-            image_path: Path to an image.
+            image_rgb: Input image as RGB (numpy uint8 array [H,W,3] or PIL Image).
             det: Detection result dict (from object_detection.py).
 
         Returns:
@@ -234,21 +276,28 @@ class Sam3BoxSegmentor:
             - masks: boolean numpy array with shape [N, H, W]
         """
 
-        image_path = Path(image_path)
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
-
-        image = Image.open(image_path).convert("RGB")
-        image_np = np.array(image, dtype=np.uint8)
+        if isinstance(image_rgb, Image.Image):
+            image_np = np.array(image_rgb.convert("RGB"), dtype=np.uint8)
+        else:
+            image_np = np.asarray(image_rgb)
+            if image_np.ndim != 3 or image_np.shape[2] != 3:
+                raise ValueError(f"image_rgb must have shape [H,W,3], got {image_np.shape}")
+            if image_np.dtype != np.uint8:
+                image_np = image_np.astype(np.uint8)
         h, w = image_np.shape[:2]
 
-        boxes = np.asarray(det.get("boxes_xyxy", []), dtype=np.float32)
+        if isinstance(det, dict):
+            det_obj = DetectionResult.from_json_dict(det)
+        else:
+            det_obj = det
+
+        boxes = np.asarray(det_obj.boxes_xyxy, dtype=np.float32)
         if boxes.size == 0:
             masks_arr = np.zeros((0, h, w), dtype=bool)
-            scores = []
+            scores_np = np.zeros((0,), dtype=np.float32)
         else:
             if boxes.ndim != 2 or boxes.shape[1] != 4:
-                raise ValueError("det['boxes_xyxy'] must be N x 4")
+                raise ValueError("det.boxes_xyxy must be N x 4")
 
             self.predictor.set_image(image_np)
 
@@ -267,17 +316,27 @@ class Sam3BoxSegmentor:
                 scores.append(float(ious[0]) if np.size(ious) > 0 else 0.0)
 
             masks_arr = np.stack(masks_list, axis=0)
+            scores_np = np.asarray(scores, dtype=np.float32).reshape(-1)
 
-        meta = {
-            "backend": "sam3",
-            "image_size": [h, w],
-            "prompts": det.get("prompts", []),
-            "boxes_xyxy": det.get("boxes_xyxy", []),
-            "prompt_ids": det.get("prompt_ids", []),
-            "scores": scores,
-            "_masks_shape": list(masks_arr.shape),
-        }
-        return meta, masks_arr
+        return SegmentationResult(
+            backend="sam3",
+            image_size=(int(h), int(w)),
+            prompts=list(det_obj.prompts),
+            boxes_xyxy=np.asarray(det_obj.boxes_xyxy, dtype=np.float32),
+            prompt_ids=np.asarray(det_obj.prompt_ids, dtype=np.int32),
+            scores=scores_np,
+            masks=masks_arr.astype(bool),
+        )
+
+    @torch.no_grad()
+    def segment_from_path(self, image_path: str | Path, det: DetectionResult | dict[str, Any]) -> SegmentationResult:
+        """Backward-compatible helper: load image from path then call segment()."""
+
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        image = Image.open(image_path).convert("RGB")
+        return self.segment(image, det)
 
 
 class ObjectSegmentationCLI(BaseSettings):
@@ -351,7 +410,11 @@ def main() -> None:
     if not args.detection_json.exists():
         raise FileNotFoundError(f"Detection json not found: {args.detection_json}")
 
-    det = json.loads(args.detection_json.read_text(encoding="utf-8"))
+    det_dict = json.loads(args.detection_json.read_text(encoding="utf-8"))
+    det = DetectionResult.from_json_dict(det_dict)
+
+    image = Image.open(args.image).convert("RGB")
+    image_rgb = np.array(image, dtype=np.uint8)
 
     out_dir = _resolve_output_dir(args.image, args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -377,26 +440,24 @@ def main() -> None:
     else:
         segmentor = Sam2BoxSegmentor(config)
 
-    meta, masks = segmentor.segment(args.image, det)
+    seg = segmentor.segment(image_rgb, det)
 
     np.savez_compressed(
         out_dir / "masks.npz",
-        masks=masks.astype(np.bool_),
-        boxes_xyxy=np.asarray(det.get("boxes_xyxy", []), dtype=np.float32),
-        prompt_ids=np.asarray(det.get("prompt_ids", []), dtype=np.int32),
-        scores=np.asarray(meta.get("scores", []), dtype=np.float32),
-        prompts=np.asarray(det.get("prompts", []), dtype=object),
-        image_size=np.asarray(det.get("image_size", []), dtype=np.int32),
+        masks=seg.masks.astype(np.bool_),
+        boxes_xyxy=np.asarray(seg.boxes_xyxy, dtype=np.float32),
+        prompt_ids=np.asarray(seg.prompt_ids, dtype=np.int32),
+        scores=np.asarray(seg.scores, dtype=np.float32),
+        prompts=np.asarray(seg.prompts, dtype=object),
+        image_size=np.asarray([seg.image_size[0], seg.image_size[1]], dtype=np.int32),
     )
 
-    image = Image.open(args.image).convert("RGB")
-    rgb = np.array(image, dtype=np.uint8)
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    vis = _overlay_masks(bgr, masks, det.get("prompt_ids", []))
+    bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    vis = _overlay_masks(bgr, seg.masks, seg.prompt_ids.tolist())
     cv2.imwrite(str(out_dir / "masks_vis.png"), vis)
 
     (out_dir / "masks_meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(seg.meta_json_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     print(f"[OK] masks saved under: {out_dir}")

@@ -19,8 +19,36 @@ Notes:
 
 from __future__ import annotations
 
+import os
+import sys
+
+
+def _parse_bool_arg(val: str) -> bool:
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _early_configure_hf_offline_from_argv(argv: list[str]) -> None:
+    def _get_flag(name: str) -> bool:
+        for i, tok in enumerate(argv):
+            if tok == name:
+                if i + 1 < len(argv):
+                    return _parse_bool_arg(argv[i + 1])
+                return True
+            if tok.startswith(name + "="):
+                return _parse_bool_arg(tok.split("=", 1)[1])
+        return False
+
+    if _get_flag("--hf_offline") or _get_flag("--hf_local_files_only"):
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+_early_configure_hf_offline_from_argv(sys.argv)
+
+import logging
 import json
 import re
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +58,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from gda.datatypes import DepthAndSegResult
 from gda.modules.depth_estimation import DepthEstimationConfig, DepthEstimatorDA3
 from gda.modules.object_detection import _draw_boxes
 from gda.modules.object_detection import GroundingDinoDetector, ObjectDetectionConfig
@@ -66,33 +95,78 @@ class ImageDepthAndSegPipeline:
             config: Nested configs for depth/detection/segmentation.
         """
 
+        logger = logging.getLogger("gda.pipeline")
         self.config = config
+
+        logger.info("init: depth estimator")
+        t0 = time.perf_counter()
         self.depth_estimator = DepthEstimatorDA3(config.depth)
+        logger.info("init: depth estimator done in %.2fs", time.perf_counter() - t0)
+
+        logger.info("init: detector")
+        t0 = time.perf_counter()
         self.detector = GroundingDinoDetector(config.det)
+        logger.info("init: detector done in %.2fs", time.perf_counter() - t0)
+
+        logger.info("init: segmentor backend=%s", config.seg.backend)
+        t0 = time.perf_counter()
         if config.seg.backend == "sam3":
             self.segmentor = Sam3BoxSegmentor(config.seg)
         else:
             self.segmentor = Sam2BoxSegmentor(config.seg)
+        logger.info("init: segmentor done in %.2fs", time.perf_counter() - t0)
 
-    def run(self, image_path: str | Path, prompts: list[str]) -> tuple[np.ndarray, dict, dict, np.ndarray]:
-        """Run pipeline for one image.
+    def process(self, image_rgb: np.ndarray, prompts: list[str]) -> DepthAndSegResult:
+        """Process one image from an in-memory RGB array.
 
         Args:
-            image_path: Path to input image.
+            image_rgb: Input image as RGB uint8 array, shape [H, W, 3].
             prompts: List of prompt strings.
 
         Returns:
             (depth, det, seg_meta, masks)
-            - depth: float32 array [H, W]
+            - depth: float32 array [Hd, Wd]
             - det: detection dict (json-serializable)
             - seg_meta: mask metadata dict (json-serializable)
-            - masks: bool array [N, H, W]
+            - masks: bool array [N, Hm, Wm]
         """
 
-        depth = self.depth_estimator.predict(image_path)
-        det = self.detector.detect(image_path, prompts)
-        seg_meta, masks = self.segmentor.segment(image_path, det)
-        return depth, det, seg_meta, masks
+        logger = logging.getLogger("gda.pipeline")
+
+        t0 = time.perf_counter()
+        logger.info("depth: start")
+        depth = self.depth_estimator.predict(image_rgb)
+        logger.info(
+            "depth: done in %.2fs (shape=%s)",
+            time.perf_counter() - t0,
+            tuple(depth.shape),
+        )
+
+        t0 = time.perf_counter()
+        logger.info("detect: start (prompts=%d)", len(prompts))
+        det = self.detector.detect(image_rgb, prompts)
+        logger.info(
+            "detect: done in %.2fs (boxes=%d)",
+            time.perf_counter() - t0,
+            len(det.boxes_xyxy),
+        )
+
+        t0 = time.perf_counter()
+        logger.info("segment: start")
+        seg = self.segmentor.segment(image_rgb, det)
+        logger.info(
+            "segment: done in %.2fs (masks=%d)",
+            time.perf_counter() - t0,
+            int(seg.masks.shape[0]),
+        )
+        return DepthAndSegResult(depth=depth, det=det, seg=seg)
+
+    def run(self, image_path: str | Path, prompts: list[str]) -> DepthAndSegResult:
+        """Backward-compatible wrapper: loads image from path then calls process()."""
+
+        image = Image.open(image_path).convert("RGB")
+        image_rgb = np.array(image, dtype=np.uint8)
+        return self.process(image_rgb, prompts)
 
 
 class GDACLI(BaseSettings):
@@ -105,6 +179,10 @@ class GDACLI(BaseSettings):
     output_dir: Path | None = None
 
     device: str = "cuda"  # best-effort shared default
+
+    # HuggingFace / download controls
+    hf_offline: bool = False
+    hf_local_files_only: bool = False
 
     # depth
     depth_model_name: str = "depth-anything/DA3-LARGE"
@@ -180,6 +258,10 @@ def main() -> None:
     """CLI entrypoint."""
 
     args = GDACLI()
+
+    if args.hf_offline or args.hf_local_files_only:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     if not args.image.exists():
         raise FileNotFoundError(f"Image not found: {args.image}")
 
@@ -206,18 +288,26 @@ def main() -> None:
             model_name=args.depth_model_name,
             device=args.device,
             colormap=args.depth_colormap,
+            hf_local_files_only=args.hf_local_files_only,
         ),
         det=ObjectDetectionConfig(
             model_id=args.det_model_id,
             device=args.device,
             box_threshold=args.box_th,
             text_threshold=args.text_th,
+            hf_local_files_only=args.hf_local_files_only,
         ),
         seg=ObjectSegmentationConfig(**seg_cfg_kwargs),
     )
 
     pipeline = ImageDepthAndSegPipeline(config)
-    depth, det, seg_meta, masks = pipeline.run(args.image, prompts_list)
+
+    image = Image.open(args.image).convert("RGB")
+    image_rgb = np.array(image, dtype=np.uint8)
+    result = pipeline.process(image_rgb, prompts_list)
+    depth = result.depth
+    det = result.det
+    seg = result.seg
 
     # Save depth
     np.save(out_dir / "depth.npy", depth.astype(np.float32))
@@ -226,38 +316,37 @@ def main() -> None:
 
     # Save detections
     (out_dir / "detections.json").write_text(
-        json.dumps(det, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(det.to_json_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    image = Image.open(args.image).convert("RGB")
     det_vis = _draw_boxes(image, det)
     det_vis.save(out_dir / "detections_vis.png")
 
     # Save masks
     np.savez_compressed(
         out_dir / "masks.npz",
-        masks=masks.astype(np.bool_),
-        boxes_xyxy=np.asarray(det.get("boxes_xyxy", []), dtype=np.float32),
-        prompt_ids=np.asarray(det.get("prompt_ids", []), dtype=np.int32),
-        scores=np.asarray(seg_meta.get("scores", []), dtype=np.float32),
-        prompts=np.asarray(det.get("prompts", []), dtype=object),
-        image_size=np.asarray(det.get("image_size", []), dtype=np.int32),
+        masks=seg.masks.astype(np.bool_),
+        boxes_xyxy=np.asarray(seg.boxes_xyxy, dtype=np.float32),
+        prompt_ids=np.asarray(seg.prompt_ids, dtype=np.int32),
+        scores=np.asarray(seg.scores, dtype=np.float32),
+        prompts=np.asarray(seg.prompts, dtype=object),
+        image_size=np.asarray([seg.image_size[0], seg.image_size[1]], dtype=np.int32),
     )
     (out_dir / "masks_meta.json").write_text(
-        json.dumps(seg_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(seg.meta_json_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     # Save visualizations
     rgb = np.array(image, dtype=np.uint8)
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    masks_vis = _overlay_masks(bgr, masks, det.get("prompt_ids", []))
+    masks_vis = _overlay_masks(bgr, seg.masks, seg.prompt_ids.tolist())
     cv2.imwrite(str(out_dir / "masks_vis.png"), masks_vis)
 
     # Depth prediction may be at a different resolution than the input image.
     # For visualization, resize the colorized depth to the mask/image size.
     depth_vis_for_overlay = depth_vis
-    if masks.ndim == 3:
-        target_h, target_w = int(masks.shape[1]), int(masks.shape[2])
+    if seg.masks.ndim == 3:
+        target_h, target_w = int(seg.masks.shape[1]), int(seg.masks.shape[2])
         if depth_vis_for_overlay.shape[0] != target_h or depth_vis_for_overlay.shape[1] != target_w:
             depth_vis_for_overlay = cv2.resize(
                 depth_vis_for_overlay,
@@ -265,7 +354,7 @@ def main() -> None:
                 interpolation=cv2.INTER_LINEAR,
             )
 
-    depth_with_masks = _overlay_masks(depth_vis_for_overlay, masks, det.get("prompt_ids", []))
+    depth_with_masks = _overlay_masks(depth_vis_for_overlay, seg.masks, seg.prompt_ids.tolist())
     cv2.imwrite(str(out_dir / "depth_with_masks.png"), depth_with_masks)
 
     print(f"[OK] outputs saved under: {out_dir}")
