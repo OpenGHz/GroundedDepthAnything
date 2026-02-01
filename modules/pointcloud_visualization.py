@@ -16,6 +16,7 @@ Notes:
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -51,6 +52,14 @@ class PointCloudVisualizer:
     def visualize(self, points_xyz: np.ndarray, colors: np.ndarray | None, rep_point_indices: np.ndarray | None) -> None:
         o3d = _maybe_import_open3d()
 
+        # Fail fast on common headless setups.
+        if os.name != "nt":
+            if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+                raise RuntimeError(
+                    "Open3D visualization requires a GUI display, but DISPLAY/WAYLAND_DISPLAY is not set. "
+                    "Run without visualization, or use X11 forwarding / a desktop session."
+                )
+
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(np.asarray(points_xyz, dtype=np.float64))
 
@@ -79,7 +88,13 @@ class PointCloudVisualizer:
 
         # Use Visualizer to set point size.
         vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name="GDA PointCloud", width=1280, height=720)
+        ok = vis.create_window(window_name="GDA PointCloud", width=1280, height=720)
+        if not ok:
+            vis.destroy_window()
+            raise RuntimeError(
+                "Open3D failed to create a window. This is commonly caused by missing/invalid display setup "
+                "(e.g., no X server, bad DISPLAY, or headless environment)."
+            )
         for g in geoms:
             vis.add_geometry(g)
         opt = vis.get_render_option()

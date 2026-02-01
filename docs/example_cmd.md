@@ -192,7 +192,7 @@ conda run -n dinov3 python -m gda.image_to_positions \
 可选：生成 pointcloud 并打开 GUI 可视化（需要 Open3D + 有显示环境）：
 
 ```bash
-conda run -n dinov3 python -m gda.image_to_positions \
+conda run -n dinov3 --no-capture-output python -m gda.image_to_positions \
   --image images/test.jpg \
   --prompts "cat,dog,car" \
   --output_dir outputs/image_to_positions \
@@ -203,6 +203,7 @@ conda run -n dinov3 python -m gda.image_to_positions \
   --visualize_seconds 10
 
 注：不设置 `--visualize_seconds` 时，Open3D 窗口会一直阻塞直到手动关闭。
+注：`conda run` 默认会捕获/缓冲输出；建议加 `--no-capture-output` 以便实时看到日志。
 ```
 
 输出（若启用 pointcloud）：
