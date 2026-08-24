@@ -226,21 +226,51 @@ def _copy_committed_source(
         archive_path.unlink(missing_ok=True)
 
 
+def _git_apply_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_DIR"] = os.devnull
+    env.pop("GIT_WORK_TREE", None)
+    return env
+
+
 def _apply_patch(build_tree: Path, patch_path: Path) -> None:
     command = ["git", "apply", "--no-index", "--unidiff-zero"]
+    # The build tree lives below the parent repository's ignored .pixi path.
+    # Force no-index mode outside that repository context; otherwise git apply
+    # exits successfully after silently skipping every ignored target file.
+    apply_env = _git_apply_environment()
     check = subprocess.run(
         [*command, "--check", str(patch_path)],
         cwd=build_tree,
         check=False,
         capture_output=True,
         text=True,
+        env=apply_env,
     )
     if check.returncode != 0:
         raise RuntimeError(
             f"Cannot apply the pinned SAM2 CUDA patch to isolated copy {build_tree}:\n"
             f"{check.stderr.strip()}"
         )
-    subprocess.run([*command, str(patch_path)], cwd=build_tree, check=True)
+    subprocess.run(
+        [*command, str(patch_path)],
+        cwd=build_tree,
+        check=True,
+        env=apply_env,
+    )
+    reverse_check = subprocess.run(
+        [*command, "--reverse", "--check", str(patch_path)],
+        cwd=build_tree,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=apply_env,
+    )
+    if reverse_check.returncode != 0:
+        raise RuntimeError(
+            f"SAM2 CUDA patch did not modify the isolated copy {build_tree}:\n"
+            f"{reverse_check.stderr.strip()}"
+        )
 
 
 def _validate_existing_build(
@@ -295,6 +325,7 @@ def _validate_existing_build(
         check=False,
         capture_output=True,
         text=True,
+        env=_git_apply_environment(),
     )
     if reverse_check.returncode != 0:
         raise RuntimeError(

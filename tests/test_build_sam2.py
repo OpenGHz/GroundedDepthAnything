@@ -130,6 +130,36 @@ def test_prepare_build_tree_is_isolated_and_reusable(
         build_sam2.prepare_build_tree(source_repo, build_root, patch_file, marker)
 
 
+def test_patch_applies_inside_parent_ignored_build_directory(
+    source_repo: Path,
+    patch_file: Path,
+    tmp_path: Path,
+) -> None:
+    parent_repo = tmp_path / "parent"
+    parent_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(parent_repo)], check=True)
+    (parent_repo / ".gitignore").write_text(".pixi/\n", encoding="utf-8")
+    marker = _marker(commit=_git(source_repo, "rev-parse", "HEAD"))
+
+    build_tree = build_sam2.prepare_build_tree(
+        source_repo,
+        parent_repo / ".pixi" / "gda-build" / "sam2",
+        patch_file,
+        marker,
+    )
+
+    assert (build_tree / "setup.py").read_text(encoding="utf-8") == "patched\n"
+    assert (
+        build_sam2.prepare_build_tree(
+            source_repo,
+            parent_repo / ".pixi" / "gda-build" / "sam2",
+            patch_file,
+            marker,
+        )
+        == build_tree
+    )
+
+
 def test_prepare_build_tree_does_not_overwrite_unrecognized_directory(
     source_repo: Path,
     patch_file: Path,
