@@ -25,7 +25,7 @@ fi
 #ai <<<
 
 export GDA_PIXI_PLATFORM=b300
-export GDA_SETUP_INPUTS_SHA256=3947713b76229cd4b5d70e2b52b7ab10e21660bd657b796fb6958f086f763022
+export GDA_SETUP_INPUTS_SHA256=9172e853f51e884cc0b77be188e161385b4ea4f4d00847cdbd8cd0504fae0973
 
 #ai: always
 #ai: name validate-setup-inputs

@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+
 from gda.datatypes import DetectionResult
 from gda.modules.object_segmentation import Sam2BoxSegmentor
 

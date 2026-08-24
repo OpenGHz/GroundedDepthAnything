@@ -5,11 +5,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from PIL import Image
+from pydantic import ValidationError
+
 from gda.datatypes import DetectionResult
 from gda.modules import grounded_segmentation as grounded
 from gda.modules.object_detection import GroundingDinoDetector
-from PIL import Image
-from pydantic import ValidationError
 
 
 class FakeSam3Processor:
