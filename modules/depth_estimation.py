@@ -21,7 +21,10 @@ import numpy as np
 import torch
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import CliApp
+
+DEFAULT_DA3_MODEL_ID = "depth-anything/DA3-LARGE"
+DEFAULT_DA3_MODEL_REVISION = "c54c26b16ec04d218e8d584ecf4bce082a9fcc20"
 
 
 def _import_depth_anything3():
@@ -34,15 +37,25 @@ def _import_depth_anything3():
     return DepthAnything3
 
 
-class DepthEstimationConfig(BaseModel):
+class DepthEstimationConfig(BaseModel, frozen=True):
     """Configuration for Depth-Anything-3 depth estimation."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
-    model_name: str = "depth-anything/DA3-LARGE"
+    model_name: str = DEFAULT_DA3_MODEL_ID
+    """Hugging Face model repository or a local model directory."""
+
+    model_revision: str | None = DEFAULT_DA3_MODEL_REVISION
+    """Exact Hugging Face model revision; set to null only for a local directory."""
+
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    """Torch device used for depth inference."""
+
     colormap: Literal["turbo", "inferno", "magma", "viridis", "jet"] = "turbo"
+    """Colormap used for the saved depth visualization."""
+
     hf_local_files_only: bool = False
+    """Require the pinned model files to exist in the local Hugging Face cache."""
 
 
 class DepthEstimatorDA3:
@@ -64,6 +77,7 @@ class DepthEstimatorDA3:
         model_type = _import_depth_anything3()
         self.model = model_type.from_pretrained(
             config.model_name,
+            revision=config.model_revision,
             local_files_only=bool(config.hf_local_files_only),
         ).to(self.device)
         logger.info("DA3 loaded in %.2fs", time.perf_counter() - t0)
@@ -140,20 +154,34 @@ class DepthEstimatorDA3:
         return cv2.applyColorMap(gray, cmap)
 
 
-class DepthEstimationCLI(BaseSettings):
+class DepthEstimationArgs(BaseModel, frozen=True):
     """CLI arguments for depth estimation."""
 
-    model_config = SettingsConfigDict(cli_parse_args=True, extra="ignore")
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     image: Path
-    output_dir: Path | None = None
+    """Input image path."""
 
-    model_name: str = "depth-anything/DA3-LARGE"
+    output_dir: Path | None = None
+    """Output directory; defaults to the input image directory."""
+
+    model_name: str = DEFAULT_DA3_MODEL_ID
+    """Depth-Anything-3 model repository or local directory."""
+
+    model_revision: str | None = DEFAULT_DA3_MODEL_REVISION
+    """Exact Depth-Anything-3 Hugging Face revision."""
+
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    """Torch device used for depth inference."""
+
     colormap: Literal["turbo", "inferno", "magma", "viridis", "jet"] = "turbo"
+    """Depth visualization colormap."""
 
     save_npy: bool = True
+    """Save the raw float32 depth map."""
+
     save_png: bool = True
+    """Save the colorized depth visualization."""
 
 
 def _resolve_output_dir(image_path: Path, output_dir: Path | None) -> Path:
@@ -165,10 +193,10 @@ def _resolve_output_dir(image_path: Path, output_dir: Path | None) -> Path:
     return output_dir if output_dir is not None else image_path.parent
 
 
-def main() -> None:
+def main(cli_args: list[str] | None = None) -> None:
     """CLI entrypoint."""
 
-    args = DepthEstimationCLI()
+    args = CliApp.run(DepthEstimationArgs, cli_args=cli_args)
     if not args.image.exists():
         raise FileNotFoundError(f"Image not found: {args.image}")
 
@@ -178,6 +206,7 @@ def main() -> None:
     estimator = DepthEstimatorDA3(
         DepthEstimationConfig(
             model_name=args.model_name,
+            model_revision=args.model_revision,
             device=args.device,
             colormap=args.colormap,
         )

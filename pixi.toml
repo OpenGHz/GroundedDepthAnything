@@ -38,9 +38,10 @@ triton = "==3.6.0"
 xformers = "==0.0.35"
 flash-attn-3 = { version = "==3.0.0", index = "https://download.pytorch.org/whl/cu128" }
 grounded-depth-anything = { path = ".", editable = true }
-depth-anything-3 = { path = "../Depth-Anything-3", editable = true }
-sam3 = { path = "../sam3", editable = true }
+depth-anything-3 = { path = "third_party/depth-anything-3", editable = true }
+sam3 = { path = "third_party/sam3", editable = true }
 addict = ">=2.4,<3"
+build = ">=1,<2"
 pycocotools = ">=2.0.8,<3"
 psutil = ">=5.9,<8"
 pytest = ">=9,<10"
@@ -61,13 +62,14 @@ TORCH_CUDA_ARCH_LIST = "10.3"
 GDA_EXPECTED_CUDA_ARCH = "10.3"
 
 [tasks]
-workspace-check = { cmd = "python scripts/check-workspace.py", description = "Check pinned sibling repositories" }
+workspace-check = { cmd = "python scripts/check-workspace.py", description = "Check pinned recursive submodules" }
 segment = { cmd = "gda-segment", description = "Run grounded image segmentation; append CLI arguments" }
 pipeline = { cmd = "gda", description = "Run depth plus grounded segmentation; append CLI arguments" }
 positions = { cmd = "gda-positions", description = "Run the image-to-3D-position pipeline; append CLI arguments" }
 format = { cmd = "ruff format .", description = "Format GDA Python code" }
+format-check = { cmd = "ruff format --check .", description = "Check GDA Python formatting" }
 lint = { cmd = "ruff check .", description = "Lint GDA Python code" }
-test = { cmd = "pytest -q", description = "Run CPU unit tests without model downloads" }
-build-sam2 = { cmd = "python scripts/build-sam2.py", description = "Build the vendored SAM2 CUDA extension for the detected GPU" }
+test = { cmd = "pytest -q -m 'not gpu'", description = "Run CPU unit tests without model downloads" }
+build-sam2 = { cmd = "python scripts/build-sam2.py", depends-on = ["workspace-check"], description = "Build SAM2 CUDA from an isolated copy of the pinned submodule" }
 doctor = { cmd = "python scripts/doctor.py", depends-on = ["build-sam2"], description = "Verify the CUDA runtime and compiled SAM2 extension" }
-verify = { depends-on = ["lint", "test", "doctor"], description = "Run all code and GPU environment checks" }
+verify = { depends-on = ["format-check", "lint", "test", "doctor"], description = "Run all code and GPU environment checks" }

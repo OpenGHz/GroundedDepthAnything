@@ -7,14 +7,14 @@ import os
 import urllib.request
 from pathlib import Path
 
-CHECKPOINT = (
-    Path(os.environ.get("GDA_WORKSPACE_ROOT", Path(__file__).resolve().parents[2]))
-    / "sdf_compute"
-    / "thirdparty"
-    / "grounded_sam_2"
-    / "checkpoints"
-    / "sam2.1_hiera_large.pt"
+CONFIGURED_CACHE = os.environ.get("GDA_CACHE_DIR")
+XDG_CACHE_HOME = os.environ.get("XDG_CACHE_HOME")
+CACHE_ROOT = (
+    Path(CONFIGURED_CACHE).expanduser().resolve()
+    if CONFIGURED_CACHE
+    else (Path(XDG_CACHE_HOME).expanduser() if XDG_CACHE_HOME else Path.home() / ".cache") / "gda"
 )
+CHECKPOINT = CACHE_ROOT / "checkpoints" / "sam2.1_hiera_large.pt"
 URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
 SHA256 = "2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318"
 

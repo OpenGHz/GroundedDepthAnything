@@ -20,9 +20,12 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ConfigDict
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import CliApp
 
 from gda.datatypes import DetectionResult
+
+DEFAULT_GROUNDING_DINO_MODEL_ID = "IDEA-Research/grounding-dino-base"
+DEFAULT_GROUNDING_DINO_MODEL_REVISION = "12bdfa3120f3e7ec7b434d90674b3396eccf88eb"
 
 
 def _import_grounding_dino_components():
@@ -35,16 +38,28 @@ def _import_grounding_dino_components():
     return AutoModelForZeroShotObjectDetection, AutoProcessor
 
 
-class ObjectDetectionConfig(BaseModel):
+class ObjectDetectionConfig(BaseModel, frozen=True):
     """Configuration for GroundingDINO detection."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
-    model_id: str = "IDEA-Research/grounding-dino-base"
+    model_id: str = DEFAULT_GROUNDING_DINO_MODEL_ID
+    """Hugging Face GroundingDINO repository or local model directory."""
+
+    model_revision: str | None = DEFAULT_GROUNDING_DINO_MODEL_REVISION
+    """Exact Hugging Face model revision; set to null only for a local directory."""
+
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
+    """Torch device used for box detection."""
+
     box_threshold: float = 0.25
+    """Minimum box confidence retained by post-processing."""
+
     text_threshold: float = 0.3
+    """Minimum text-token confidence retained by post-processing."""
+
     hf_local_files_only: bool = False
+    """Require the pinned model files to exist in the local Hugging Face cache."""
 
 
 class GroundingDinoDetector:
@@ -66,6 +81,7 @@ class GroundingDinoDetector:
         t0 = time.perf_counter()
         self.processor = processor_type.from_pretrained(
             config.model_id,
+            revision=config.model_revision,
             local_files_only=bool(config.hf_local_files_only),
         )
         logger.info("processor loaded in %.2fs", time.perf_counter() - t0)
@@ -75,6 +91,7 @@ class GroundingDinoDetector:
         self.model = (
             model_type.from_pretrained(
                 config.model_id,
+                revision=config.model_revision,
                 local_files_only=bool(config.hf_local_files_only),
             )
             .to(self.device)
@@ -187,19 +204,34 @@ class GroundingDinoDetector:
         return self.detect(image, prompts)
 
 
-class ObjectDetectionCLI(BaseSettings):
+class ObjectDetectionArgs(BaseModel, frozen=True):
     """CLI arguments for object detection."""
 
-    model_config = SettingsConfigDict(cli_parse_args=True, extra="ignore")
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     image: Path
-    prompts: str
-    output_dir: Path | None = None
+    """Input image path."""
 
-    model_id: str = "IDEA-Research/grounding-dino-base"
+    prompts: str
+    """Comma-, semicolon-, or newline-separated text concepts."""
+
+    output_dir: Path | None = None
+    """Output directory; defaults to the input image directory."""
+
+    model_id: str = DEFAULT_GROUNDING_DINO_MODEL_ID
+    """GroundingDINO model repository or local directory."""
+
+    model_revision: str | None = DEFAULT_GROUNDING_DINO_MODEL_REVISION
+    """Exact GroundingDINO Hugging Face revision."""
+
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
+    """Torch device used for detection."""
+
     box_th: float = 0.25
+    """Minimum box confidence retained by post-processing."""
+
     text_th: float = 0.3
+    """Minimum text-token confidence retained by post-processing."""
 
 
 def _parse_prompts(prompts: str) -> list[str]:
@@ -277,10 +309,10 @@ def _draw_boxes(image: Image.Image, det: dict[str, Any]) -> Image.Image:
     return img
 
 
-def main() -> None:
+def main(cli_args: list[str] | None = None) -> None:
     """CLI entrypoint."""
 
-    args = ObjectDetectionCLI()
+    args = CliApp.run(ObjectDetectionArgs, cli_args=cli_args)
     if not args.image.exists():
         raise FileNotFoundError(f"Image not found: {args.image}")
 
@@ -294,6 +326,7 @@ def main() -> None:
     detector = GroundingDinoDetector(
         ObjectDetectionConfig(
             model_id=args.model_id,
+            model_revision=args.model_revision,
             device=args.device,
             box_threshold=args.box_th,
             text_threshold=args.text_th,

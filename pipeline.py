@@ -35,8 +35,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import CliApp
 
 from gda.datatypes import DepthAndSegResult
-from gda.modules.depth_estimation import DepthEstimationConfig, DepthEstimatorDA3
+from gda.modules.depth_estimation import (
+    DEFAULT_DA3_MODEL_ID,
+    DEFAULT_DA3_MODEL_REVISION,
+    DepthEstimationConfig,
+    DepthEstimatorDA3,
+)
 from gda.modules.grounded_segmentation import (
+    DEFAULT_SAM3_MODEL_REVISION,
     AutocastDtype,
     GroundedBackend,
     GroundedSegmentationConfig,
@@ -44,7 +50,12 @@ from gda.modules.grounded_segmentation import (
     Sam3ConceptSegmentationConfig,
     build_grounded_segmentor,
 )
-from gda.modules.object_detection import ObjectDetectionConfig, _draw_boxes
+from gda.modules.object_detection import (
+    DEFAULT_GROUNDING_DINO_MODEL_ID,
+    DEFAULT_GROUNDING_DINO_MODEL_REVISION,
+    ObjectDetectionConfig,
+    _draw_boxes,
+)
 from gda.modules.object_segmentation import ObjectSegmentationConfig, Sam2AutocastDtype
 
 
@@ -66,7 +77,7 @@ class ImageDepthAndSegPipeline:
     Given an image and prompts, it produces:
     - depth map
     - bbox detections
-    - segmentation masks (SAM2 default)
+    - segmentation masks (native SAM3 by default)
     """
 
     def __init__(self, config: PipelineConfig):
@@ -133,7 +144,7 @@ class ImageDepthAndSegPipeline:
         return self.process(image_rgb, prompts)
 
 
-class GDAArgs(BaseModel):
+class GDAArgs(BaseModel, frozen=True):
     """CLI arguments for the main pipeline."""
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
@@ -156,14 +167,20 @@ class GDAArgs(BaseModel):
     hf_local_files_only: bool = False
     """Load Hugging Face models from local files only."""
 
-    depth_model_name: str = "depth-anything/DA3-LARGE"
+    depth_model_name: str = DEFAULT_DA3_MODEL_ID
     """Depth-Anything-3 model id."""
+
+    depth_model_revision: str | None = DEFAULT_DA3_MODEL_REVISION
+    """Exact Depth-Anything-3 Hugging Face revision."""
 
     depth_colormap: Literal["turbo", "inferno", "magma", "viridis", "jet"] = "turbo"
     """Depth visualization colormap."""
 
-    det_model_id: str = "IDEA-Research/grounding-dino-base"
+    det_model_id: str = DEFAULT_GROUNDING_DINO_MODEL_ID
     """GroundingDINO model id used by the SAM2 backend."""
+
+    det_model_revision: str | None = DEFAULT_GROUNDING_DINO_MODEL_REVISION
+    """Exact GroundingDINO Hugging Face revision used by the SAM2 backend."""
 
     box_th: float = Field(default=0.25, ge=0.0, le=1.0)
     """GroundingDINO box threshold."""
@@ -188,6 +205,9 @@ class GDAArgs(BaseModel):
 
     sam3_load_from_hf: bool = True
     """Download gated SAM3 weights when no checkpoint is supplied."""
+
+    sam3_model_revision: str = DEFAULT_SAM3_MODEL_REVISION
+    """Exact SAM3 Hugging Face revision used when downloading the gated checkpoint."""
 
     sam3_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """SAM3 instance confidence threshold."""
@@ -290,6 +310,7 @@ def main(cli_args: list[str] | None = None) -> None:
     config = PipelineConfig(
         depth=DepthEstimationConfig(
             model_name=args.depth_model_name,
+            model_revision=args.depth_model_revision,
             device=args.device,
             colormap=args.depth_colormap,
             hf_local_files_only=local_files_only,
@@ -299,6 +320,7 @@ def main(cli_args: list[str] | None = None) -> None:
             grounded_sam2=GroundingDinoSam2Config(
                 detector=ObjectDetectionConfig(
                     model_id=args.det_model_id,
+                    model_revision=args.det_model_revision,
                     device=args.device,
                     box_threshold=args.box_th,
                     text_threshold=args.text_th,
@@ -310,6 +332,7 @@ def main(cli_args: list[str] | None = None) -> None:
                 device=args.device,
                 checkpoint=args.sam3_checkpoint,
                 load_from_hf=args.sam3_load_from_hf,
+                model_revision=args.sam3_model_revision,
                 confidence_threshold=args.sam3_confidence_threshold,
                 resolution=args.sam3_resolution,
                 compile=args.sam3_compile,

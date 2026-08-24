@@ -25,6 +25,8 @@ from gda.datatypes import (
     SegmentationResult,
 )
 from gda.modules.object_detection import (
+    DEFAULT_GROUNDING_DINO_MODEL_ID,
+    DEFAULT_GROUNDING_DINO_MODEL_REVISION,
     GroundingDinoDetector,
     ObjectDetectionConfig,
     _draw_boxes,
@@ -37,12 +39,13 @@ from gda.modules.object_segmentation import (
     Sam2BoxSegmentor,
     _overlay_masks,
 )
-from gda.modules.workspace import workspace_root
+from gda.modules.workspace import third_party_root
 
-_REPO_ROOT = workspace_root()
+_THIRD_PARTY_ROOT = third_party_root()
 
 GroundedBackend = Literal["sam2", "sam3"]
 AutocastDtype = Literal["none", "bfloat16", "float16"]
+DEFAULT_SAM3_MODEL_REVISION = "3c879f39826c281e95690f02c7821c4de09afae7"
 
 
 def _import_sam3_components():
@@ -50,23 +53,38 @@ def _import_sam3_components():
 
     try:
         from sam3.model.sam3_image_processor import Sam3Processor
-        from sam3.model_builder import build_sam3_image_model, download_ckpt_from_hf
+        from sam3.model_builder import build_sam3_image_model
     except ImportError:
-        sam3_root = _REPO_ROOT / "sam3"
-        if not sam3_root.exists():
+        sam3_root = _THIRD_PARTY_ROOT / "sam3"
+        if not (sam3_root / "sam3").is_dir():
             raise FileNotFoundError(
-                f"SAM3 repository not found: {sam3_root}. Run `pixi install` first."
+                f"SAM3 submodule not found: {sam3_root}. Run "
+                "`git submodule update --init --recursive`."
             )
         sys.path.insert(0, str(sam3_root))
         try:
             from sam3.model.sam3_image_processor import Sam3Processor
-            from sam3.model_builder import build_sam3_image_model, download_ckpt_from_hf
+            from sam3.model_builder import build_sam3_image_model
         except ImportError as exc:  # pragma: no cover - optional heavyweight runtime
             raise ImportError(
                 "Failed to import SAM3. Run `pixi install` from the gda repository."
             ) from exc
 
-    return build_sam3_image_model, download_ckpt_from_hf, Sam3Processor
+    return build_sam3_image_model, Sam3Processor
+
+
+def _download_sam3_checkpoint(revision: str) -> Path:
+    """Download the gated SAM3 image checkpoint from an exact model revision."""
+
+    from huggingface_hub import hf_hub_download
+
+    return Path(
+        hf_hub_download(
+            repo_id="facebook/sam3",
+            filename="sam3.pt",
+            revision=revision,
+        )
+    )
 
 
 def _as_rgb_array(image_rgb: np.ndarray | Image.Image) -> np.ndarray:
@@ -101,6 +119,9 @@ class Sam3ConceptSegmentationConfig(BaseModel, frozen=True):
 
     load_from_hf: bool = True
     """Download the gated checkpoint from Hugging Face when no local path is given."""
+
+    model_revision: str = DEFAULT_SAM3_MODEL_REVISION
+    """Exact Hugging Face model revision used when downloading the gated checkpoint."""
 
     confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """Minimum concept-presence-adjusted score retained as an instance."""
@@ -180,7 +201,7 @@ class Sam3ConceptSegmentor:
 
     def __init__(self, config: Sam3ConceptSegmentationConfig):
         self.config = config
-        build_model, download_checkpoint, processor_type = _import_sam3_components()
+        build_model, processor_type = _import_sam3_components()
 
         checkpoint = config.checkpoint
         if checkpoint is None:
@@ -188,7 +209,7 @@ class Sam3ConceptSegmentor:
                 raise FileNotFoundError(
                     "SAM3 offline mode requires --sam3-checkpoint pointing to a local sam3.pt."
                 )
-            checkpoint = Path(download_checkpoint(version="sam3"))
+            checkpoint = _download_sam3_checkpoint(config.model_revision)
         elif not checkpoint.exists():
             raise FileNotFoundError(f"SAM3 checkpoint not found: {checkpoint}")
 
@@ -384,7 +405,7 @@ def build_grounded_segmentor(config: GroundedSegmentationConfig) -> GroundedSegm
     return GroundingDinoSam2Segmentor(config.grounded_sam2)
 
 
-class GroundedSegmentationArgs(BaseModel):
+class GroundedSegmentationArgs(BaseModel, frozen=True):
     """CLI arguments for text-grounded instance segmentation."""
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
@@ -407,8 +428,11 @@ class GroundedSegmentationArgs(BaseModel):
     hf_offline: bool = False
     """Use only locally cached Hugging Face files."""
 
-    det_model_id: str = "IDEA-Research/grounding-dino-base"
+    det_model_id: str = DEFAULT_GROUNDING_DINO_MODEL_ID
     """GroundingDINO model id used by the SAM2 backend."""
+
+    det_model_revision: str | None = DEFAULT_GROUNDING_DINO_MODEL_REVISION
+    """Exact GroundingDINO Hugging Face revision used by the SAM2 backend."""
 
     box_th: float = Field(default=0.25, ge=0.0, le=1.0)
     """GroundingDINO box threshold."""
@@ -430,6 +454,9 @@ class GroundedSegmentationArgs(BaseModel):
 
     sam3_load_from_hf: bool = True
     """Download gated SAM3 weights when no checkpoint is supplied."""
+
+    sam3_model_revision: str = DEFAULT_SAM3_MODEL_REVISION
+    """Exact SAM3 Hugging Face revision used when downloading the gated checkpoint."""
 
     sam3_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """SAM3 instance confidence threshold."""
@@ -469,6 +496,7 @@ def main(cli_args: list[str] | None = None) -> None:
         grounded_sam2=GroundingDinoSam2Config(
             detector=ObjectDetectionConfig(
                 model_id=args.det_model_id,
+                model_revision=args.det_model_revision,
                 device=args.device,
                 box_threshold=args.box_th,
                 text_threshold=args.text_th,
@@ -485,6 +513,7 @@ def main(cli_args: list[str] | None = None) -> None:
             device=args.device,
             checkpoint=args.sam3_checkpoint,
             load_from_hf=args.sam3_load_from_hf,
+            model_revision=args.sam3_model_revision,
             confidence_threshold=args.sam3_confidence_threshold,
             resolution=args.sam3_resolution,
             compile=args.sam3_compile,

@@ -38,15 +38,25 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import CliApp
 
 from gda.datatypes import ImageToPositionsResult
-from gda.modules.depth_estimation import DepthEstimationConfig
+from gda.modules.depth_estimation import (
+    DEFAULT_DA3_MODEL_ID,
+    DEFAULT_DA3_MODEL_REVISION,
+    DepthEstimationConfig,
+)
 from gda.modules.grounded_segmentation import (
+    DEFAULT_SAM3_MODEL_REVISION,
     AutocastDtype,
     GroundedBackend,
     GroundedSegmentationConfig,
     GroundingDinoSam2Config,
     Sam3ConceptSegmentationConfig,
 )
-from gda.modules.object_detection import ObjectDetectionConfig, _draw_boxes
+from gda.modules.object_detection import (
+    DEFAULT_GROUNDING_DINO_MODEL_ID,
+    DEFAULT_GROUNDING_DINO_MODEL_REVISION,
+    ObjectDetectionConfig,
+    _draw_boxes,
+)
 from gda.modules.object_segmentation import ObjectSegmentationConfig, Sam2AutocastDtype
 from gda.modules.pointcloud_generation import (
     PointCloudGenerationConfig,
@@ -108,71 +118,139 @@ class ImageToPositionsPipeline:
         return self.process(image_rgb, prompts)
 
 
-class ImageToPositionsArgs(BaseModel):
+class ImageToPositionsArgs(BaseModel, frozen=True):
     """CLI arguments for the integrated pipeline."""
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     image: Path
+    """Input image path."""
+
     prompts: str
+    """Comma-, semicolon-, or newline-separated text concepts."""
+
     output_dir: Path | None = None
+    """Output directory; defaults to the input image directory."""
 
     device: Literal["cuda", "cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
+    """Shared inference device."""
 
-    # HuggingFace / download controls
     hf_offline: bool = False
+    """Disable Hugging Face network access."""
+
     hf_local_files_only: bool = False
+    """Load Hugging Face models from local files only."""
 
-    # depth
-    depth_model_name: str = "depth-anything/DA3-LARGE"
+    depth_model_name: str = DEFAULT_DA3_MODEL_ID
+    """Depth-Anything-3 model repository or local directory."""
+
+    depth_model_revision: str | None = DEFAULT_DA3_MODEL_REVISION
+    """Exact Depth-Anything-3 Hugging Face revision."""
+
     depth_colormap: Literal["turbo", "inferno", "magma", "viridis", "jet"] = "turbo"
+    """Depth visualization colormap."""
 
-    # detection
-    det_model_id: str = "IDEA-Research/grounding-dino-base"
+    det_model_id: str = DEFAULT_GROUNDING_DINO_MODEL_ID
+    """GroundingDINO model repository or local directory."""
+
+    det_model_revision: str | None = DEFAULT_GROUNDING_DINO_MODEL_REVISION
+    """Exact GroundingDINO Hugging Face revision."""
+
     box_th: float = 0.25
-    text_th: float = 0.3
+    """GroundingDINO box threshold."""
 
-    # segmentation
+    text_th: float = 0.3
+    """GroundingDINO text threshold."""
+
     seg_backend: GroundedBackend = "sam3"
+    """Grounded segmentation backend."""
+
     sam2_checkpoint: Path | None = None
+    """Optional SAM2.1 checkpoint override."""
+
     sam2_model_cfg: str | None = None
+    """Optional SAM2.1 model configuration override."""
+
     sam2_autocast_dtype: Sam2AutocastDtype = "bfloat16"
+    """SAM2 CUDA autocast dtype."""
 
     sam3_checkpoint: Path | None = None
+    """Optional local SAM3 checkpoint."""
+
     sam3_load_from_hf: bool = True
+    """Download gated SAM3 weights when no checkpoint is supplied."""
+
+    sam3_model_revision: str = DEFAULT_SAM3_MODEL_REVISION
+    """Exact SAM3 Hugging Face revision."""
+
     sam3_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """SAM3 instance confidence threshold."""
+
     sam3_resolution: Literal[1008] = 1008
+    """SAM3 square inference resolution."""
+
     sam3_compile: bool = False
+    """Compile supported SAM3 image components."""
+
     sam3_autocast_dtype: AutocastDtype = "bfloat16"
+    """SAM3 CUDA autocast dtype."""
+
     sam3_deduplicate_mask_iou: float | None = Field(default=0.9, gt=0.0, le=1.0)
+    """Cross-prompt SAM3 duplicate suppression threshold."""
 
-    # positions
     min_depth: float = 1e-6
+    """Minimum valid depth used for representative positions."""
+
     max_depth: float | None = None
+    """Optional maximum valid depth used for representative positions."""
 
-    # outputs
     save_intermediate: bool = True
+    """Save depth, box, and mask intermediate artifacts."""
 
-    # logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
-    log_file: Path | None = None
+    """Application log level."""
 
-    # optional pointcloud
+    log_file: Path | None = None
+    """Optional additional log file."""
+
     make_pointcloud: bool = False
+    """Generate a point cloud from depth and camera intrinsics."""
+
     visualize_pointcloud: bool = False
+    """Open an interactive point-cloud viewer."""
+
     visualize_seconds: float | None = None
+    """Optional point-cloud viewer duration in seconds."""
 
     k_file: Path | None = None
+    """Optional camera-intrinsics matrix file."""
+
     fx: float | None = None
+    """Camera focal length along x when no matrix file is provided."""
+
     fy: float | None = None
+    """Camera focal length along y when no matrix file is provided."""
+
     cx: float | None = None
+    """Camera principal point x when no matrix file is provided."""
+
     cy: float | None = None
+    """Camera principal point y when no matrix file is provided."""
 
     pc_min_depth: float = 1e-6
+    """Minimum depth retained in the point cloud."""
+
     pc_max_depth: float | None = None
+    """Optional maximum depth retained in the point cloud."""
+
     pc_use_masks_union_only: bool = True
+    """Restrict the point cloud to the union of detected masks."""
+
     pc_include_colors: bool = True
+    """Include RGB values in point-cloud output."""
+
     pc_save_ply: bool = True
+    """Save generated point clouds as PLY files."""
 
 
 def _parse_prompts(prompts: str) -> list[str]:
@@ -311,6 +389,7 @@ def main(cli_args: list[str] | None = None) -> None:
         pipeline=PipelineConfig(
             depth=DepthEstimationConfig(
                 model_name=args.depth_model_name,
+                model_revision=args.depth_model_revision,
                 device=args.device,
                 colormap=args.depth_colormap,
                 hf_local_files_only=local_files_only,
@@ -320,6 +399,7 @@ def main(cli_args: list[str] | None = None) -> None:
                 grounded_sam2=GroundingDinoSam2Config(
                     detector=ObjectDetectionConfig(
                         model_id=args.det_model_id,
+                        model_revision=args.det_model_revision,
                         device=args.device,
                         box_threshold=args.box_th,
                         text_threshold=args.text_th,
@@ -331,6 +411,7 @@ def main(cli_args: list[str] | None = None) -> None:
                     device=args.device,
                     checkpoint=args.sam3_checkpoint,
                     load_from_hf=args.sam3_load_from_hf,
+                    model_revision=args.sam3_model_revision,
                     confidence_threshold=args.sam3_confidence_threshold,
                     resolution=args.sam3_resolution,
                     compile=args.sam3_compile,
@@ -423,10 +504,9 @@ def main(cli_args: list[str] | None = None) -> None:
         cv2.imwrite(str(out_dir / "depth_with_masks.png"), depth_with_masks)
         logger.info("visualizations saved")
 
-    if args.visualize_pointcloud:
-        args.make_pointcloud = True
+    make_pointcloud = args.make_pointcloud or args.visualize_pointcloud
 
-    if args.make_pointcloud:
+    if make_pointcloud:
         logger.info("pointcloud generation start")
         k = _make_k_from_args(args)
         pc_cfg = PointCloudGenerationConfig(

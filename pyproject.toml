@@ -46,6 +46,7 @@ markers = ["gpu: requires CUDA and model checkpoints"]
 [tool.ruff]
 line-length = 99
 target-version = "py312"
+extend-exclude = ["third_party"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

@@ -1,12 +1,6 @@
-# Legacy requirements file. Use pixi.toml/pixi.lock for the supported runtime.
-# This list is retained only for older sdf_compute scripts.
-# common
-torch>=2
-torchvision
-# da3
-xformers
-# others
-supervision>=0.18.0 # 用于标注和可视化
-
-# post-processing
-open3d>=0.19.0
+# Compatibility marker for tooling that expects requirements.txt.
+#
+# GDA's supported H200/B300 environments are fully declared in pixi.toml and
+# pixi.lock. A standalone pip requirements file cannot represent the selected
+# CUDA wheels, editable Git submodules, or isolated SAM2 CUDA build, so no
+# incomplete fallback dependency list is maintained here.

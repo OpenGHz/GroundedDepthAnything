@@ -62,7 +62,7 @@ def _build_fake_segmentor(monkeypatch, checkpoint: Path, *, deduplicate_mask_iou
     monkeypatch.setattr(
         grounded,
         "_import_sam3_components",
-        lambda: (fake_builder, lambda version: checkpoint, FakeSam3Processor),
+        lambda: (fake_builder, FakeSam3Processor),
     )
     config = grounded.Sam3ConceptSegmentationConfig(
         device="cpu",
@@ -191,7 +191,12 @@ def test_sam3_offline_mode_requires_explicit_checkpoint(monkeypatch):
     monkeypatch.setattr(
         grounded,
         "_import_sam3_components",
-        lambda: (object(), lambda version: pytest.fail("must not download"), object()),
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(
+        grounded,
+        "_download_sam3_checkpoint",
+        lambda revision: pytest.fail("must not download"),
     )
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     config = grounded.Sam3ConceptSegmentationConfig(

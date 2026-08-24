@@ -34,18 +34,11 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import CliApp
 
 from gda.datatypes import DetectionResult, SegmentationResult
-from gda.modules.workspace import workspace_root
+from gda.modules.workspace import cache_root, third_party_root
 
-_REPO_ROOT = workspace_root()
+_THIRD_PARTY_ROOT = third_party_root()
 
-_DEFAULT_SAM2_CHECKPOINT = (
-    _REPO_ROOT
-    / "sdf_compute"
-    / "thirdparty"
-    / "grounded_sam_2"
-    / "checkpoints"
-    / "sam2.1_hiera_large.pt"
-)
+_DEFAULT_SAM2_CHECKPOINT = cache_root() / "checkpoints" / "sam2.1_hiera_large.pt"
 _DEFAULT_SAM2_MODEL_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 Sam2AutocastDtype = Literal["none", "bfloat16", "float16"]
@@ -57,23 +50,17 @@ def _import_sam2_components():
     try:
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
-    except ImportError:
-        sam2_root = _REPO_ROOT / "sdf_compute" / "thirdparty" / "grounded_sam_2"
-        if not sam2_root.exists():
+    except ImportError as exc:
+        sam2_root = _THIRD_PARTY_ROOT / "grounded-sam-2"
+        if not (sam2_root / "sam2").is_dir():
             raise FileNotFoundError(
-                f"SAM2 repo path not found: {sam2_root}. Please check the workspace layout."
-            )
-
-        import sys
-
-        sys.path.insert(0, str(sam2_root))
-        try:
-            from sam2.build_sam import build_sam2
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
-        except ImportError as exc:  # pragma: no cover - depends on optional runtime
-            raise ImportError(
-                "Failed to import SAM2. Run `pixi install` from the gda repository."
+                f"SAM2 submodule not found: {sam2_root}. Run "
+                "`git submodule update --init --recursive`."
             ) from exc
+        raise ImportError(
+            "SAM2 is not installed from the isolated patched build. Run "
+            "`pixi run build-sam2` from the GDA repository."
+        ) from exc
 
     return build_sam2, SAM2ImagePredictor
 
@@ -337,7 +324,7 @@ class Sam2BoxSegmentor:
         return self.segment(image, det)
 
 
-class ObjectSegmentationArgs(BaseModel):
+class ObjectSegmentationArgs(BaseModel, frozen=True):
     """CLI arguments for object segmentation."""
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")

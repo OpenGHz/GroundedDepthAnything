@@ -1,27 +1,29 @@
-"""Locate the sibling model repositories used by the Pixi workspace."""
+"""Resolve repository-owned third-party sources and model-cache paths."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+"""Root of the GDA source checkout."""
 
-def workspace_root() -> Path:
-    """Return the configured EIA root, or infer it from the current layout."""
 
-    configured = os.environ.get("GDA_WORKSPACE_ROOT")
+def third_party_root() -> Path:
+    """Return the GDA-owned submodule root, with an explicit developer override."""
+
+    configured = os.environ.get("GDA_THIRD_PARTY_ROOT")
     if configured:
         return Path(configured).expanduser().resolve()
+    return PROJECT_ROOT / "third_party"
 
-    module_path = Path(__file__).resolve()
-    current = Path.cwd().resolve()
-    candidates = [
-        module_path.parents[2],
-        current,
-        *current.parents,
-        *module_path.parents,
-    ]
-    for candidate in candidates:
-        if (candidate / "sam3").exists() or (candidate / "Depth-Anything-3").exists():
-            return candidate
-    return module_path.parents[2]
+
+def cache_root() -> Path:
+    """Return the writable cache used for downloaded GDA model artifacts."""
+
+    configured = os.environ.get("GDA_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg_cache).expanduser() if xdg_cache else Path.home() / ".cache"
+    return (base / "gda").resolve()

@@ -1,268 +1,238 @@
-# sdf_compute 脚本输入/输出整理
+# GDA 命令与脚本输入/输出整理
 
-本文整理 [sdf_compute](../sdf_compute) 工程当前提供的脚本（含 .py/.sh）的**输入（参数、必需文件/目录）**与**输出（生成的文件/目录结构）**，便于工程接入与重构。
+本文整理当前 GDA checkout 提供的安装脚本、CLI 和稳定产物。所有命令均假设当前
+目录是项目根目录。第三方源码位于 `third_party/` Git submodules；模型权重位于
+可写 cache，均不复制到源码树或提交到 Git。
 
-> 约定：下文用
-> - `INPUT_DIR` 表示命令行的 `--input_dir`
-> - `OUTPUT_DIR` 表示命令行的 `--output_dir`
-> - `OUTPUT_BASE` 表示批处理脚本里的输出根目录
+## 1. 复现所需输入
 
----
+### 1.1 源码
 
-## 1. 总体流程（从 Bridge 数据集到 SDF）
+GDA 的默认源码组合由父仓库的 gitlinks 固定：
 
-1) [brdige_dataset_process_depth.py](../sdf_compute/brdige_dataset_process_depth.py)
-- 输入：Bridge 数据集 episode 目录（含 `images0/images1/...` 或 `image0/image1/...`，内部为 `im_XXXX.jpg`）
-- 输出：每个 stream 生成 `rgb.mp4`，并在同目录生成每帧的分割结果 `frame_XXXX.npz`（内部含 `annotated_frame_index` 等）以及可视化 GIF。
+- `third_party/sam3/`
+- `third_party/depth-anything-3/`
+- `third_party/grounded-sam-2/`
 
-2) [process_sdf.py](../sdf_compute/process_sdf.py)
-- 输入：上一步某个 episode/stream 的输出目录（至少包含 `rgb.mp4`，并包含每帧的 `frame_XXXX.npz` 或 `frame_XXXX/annotated_frame_index.npy`）
-- 输出：在 `OUTPUT_DIR` 下生成两套结果：`raw/` 与 `filtered/`，包含深度图、SDF（npy+png）、gif/mp4、点云等。
+Depth-Anything-3 还包含嵌套 submodule，因此 fresh clone 和补初始化都必须递归：
 
-3) 批处理/测试脚本
-- [test_single_case.py](../sdf_compute/test_single_case.py) 把步骤 1+2 串起来，便于快速验证
-- [batch_process_full.sh](../sdf_compute/batch_process_full.sh) / [batch_process_stepwise.sh](../sdf_compute/batch_process_stepwise.sh) 用于多 episode 的批量处理
+```bash
+git clone --recurse-submodules \
+  https://github.com/OpenGHz/GroundedDepthAnything.git
+cd GroundedDepthAnything
 
----
+# 已有 clone 使用：
+git submodule sync --recursive
+git submodule update --init --recursive
+```
 
-## 2. brdige_dataset_process_depth.py
+`scripts/check-workspace.py` 从父仓库 index 读取 gitlink，而不是依赖浮动分支名；它会
+检查直接和嵌套 submodule 是否初始化、HEAD 是否匹配以及 worktree 是否干净。
 
-脚本：[sdf_compute/brdige_dataset_process_depth.py](../sdf_compute/brdige_dataset_process_depth.py)
+### 1.2 模型权重
 
-### 2.1 入口参数
+权重不进入 Git。默认来源与定位规则如下：
 
-- `--input_dir`（必需）：Bridge 数据集输入目录，包含 episode 目录（目录名为纯数字字符串，例 `00000`）
-- `--output_dir`（必需）：输出根目录
-- `--max_videos`：最多处理多少个 episode（不传表示全部）
-- `--extract_frame_idx`：用于生成 caption 的抽帧索引（默认 0）
-- `--device`：推理设备（默认 `cuda:0`）
-- `--sam2_checkpoint`：SAM2 权重路径（可选；未提供时使用脚本内默认路径）
-- `--sam2_model_cfg`：SAM2 配置（可选；未提供时使用脚本内默认配置名）
+- SAM3：从 gated `facebook/sam3` 下载 `sam3.pt`，需要先获得访问权限并执行
+  `pixi run --platform "$GDA_PIXI_PLATFORM" --locked hf auth login`；也可以在 CLI
+  中显式提供 `--sam3-checkpoint`。
+- SAM2.1 Hiera-L：由 `scripts/ensure-sam2-checkpoint.py` 从固定公开 URL 下载并校验
+  SHA256。设置 `GDA_CACHE_DIR` 时写入
+  `$GDA_CACHE_DIR/checkpoints/sam2.1_hiera_large.pt`；未设置时通常写入
+  `~/.cache/gda/checkpoints/sam2.1_hiera_large.pt`。
+- Depth-Anything-3 与 GroundingDINO：由 Hugging Face cache 管理。
 
-### 2.2 主要输入（目录/文件约定）
+默认 `depth-anything/DA3-LARGE` 权重由上游标注为 CC BY-NC 4.0，不能因为 DA3
+源码使用 Apache-2.0 就推断权重可商用；部署前应核对
+`THIRD_PARTY_NOTICES.md` 和对应模型卡。
 
-`INPUT_DIR/{episode_id}/` 下：
+默认 Hugging Face 模型 revision 是固定 commit：
 
-- 至少存在一个 stream 目录：`images{sid}/` 或 `image{sid}/`（优先使用 `images{sid}`）
-- stream 目录内要求图片命名为：`im_XXXX.jpg`（例如 `im_0000.jpg`）
-- 其他非 image/images 开头的子目录/文件会在 Step 0 被原样复制到输出 episode 目录（便于保留元信息）
+- SAM3：`3c879f39826c281e95690f02c7821c4de09afae7`
+- Depth-Anything-3：`c54c26b16ec04d218e8d584ecf4bce082a9fcc20`
+- GroundingDINO：`12bdfa3120f3e7ec7b434d90674b3396eccf88eb`
 
-### 2.3 输出（生成的目录/文件）
+源码 gitlink 与模型 revision 是两组独立 pin，缺少任意一组都不能完整复现。
 
-**A) 按 episode/stream 的主要输出：**
+## 2. 环境与维护脚本
 
-- `OUTPUT_DIR/{episode_id}/images{sid}/rgb.mp4`
-  - 由 `im_XXXX.jpg` 合成（默认 fps=30）
+### 2.1 `scripts/setup-gpu.sh`
 
-- `OUTPUT_DIR/{episode_id}/images{sid}/frame_XXXX.npz`
-  - 每帧一个压缩 npz，来自 Step 3（GroundingDINO + SAM2）
-  - 关键字段（按代码写入）：
-    - `masks`：布尔 mask，形状约为 `[N, H, W]`
-    - `track_labels`：本次跟踪到的类别文本（OBJECTS）
-    - `object_ids`：局部对象 id（从 1 开始）
-    - `label_ids`：全局 label id（uint8）
-    - `sample_id`：形如 `{episode_id}_s{sid}`
-  - Step 4 会在同一个 `frame_XXXX.npz` 里**回写**：
-    - `annotated_frame_color`：彩色可视化图（H,W,3）
-    - `annotated_frame_index`：每像素的 label id（uint8）
+输入：
 
-- `OUTPUT_DIR/{episode_id}/images{sid}/result.gif`
-  - Step 3 生成，叠加 mask 与 label 的可视化
+- 已递归初始化且保持记录版本的 submodules
+- 可用的 Pixi
+- H200 或 B300 NVIDIA GPU
+- 模型下载所需的网络与访问权限
+- 可选 `GDA_PIXI_PLATFORM=h200|b300`
+- 可选 `GDA_CACHE_DIR=/path/to/cache`
 
-- `OUTPUT_DIR/{episode_id}/images{sid}/result2.gif`
-  - Step 4 生成（概率性写出），主要用于查看 `annotated_frame_*` 后处理结果
+动作与输出：
 
-**B) 全局 caption/label 相关输出：**
+- 校验 submodule gitlinks
+- 下载并校验 SAM2 checkpoint
+- 创建锁定的 `.pixi/` 环境
+- 在 `.pixi/gda-build/` 隔离副本内 patch、编译并安装 SAM2 CUDA 扩展
+- 运行 GPU doctor、单元测试、format-check 和 lint
 
-- `OUTPUT_DIR/captions/rank_0.jsonl`
-  - Step 1 生成：对每个 sample（episode+stream）抽帧，调用 Qwen-VL 生成 `raw_labels`
+直接运行 `bash scripts/setup-gpu.sh` 会自动选择 GPU 平台；若使用
+`anchored-install`，请对固定平台的 manifest 执行
+`ai run scripts/setup-h200.sh` 或 `ai run scripts/setup-b300.sh`，这样成功步骤
+才能在失败重跑时复用，且 H200/B300 不会共用缓存。
 
-- `OUTPUT_DIR/raw_labels.txt`
-  - Step 2 生成：聚合后的原始 label 列表（每行一个）
+### 2.2 `scripts/ensure-sam2-checkpoint.py`
 
-- `OUTPUT_DIR/labels.txt`
-  - Step 2 生成：聚类后的“top labels”（每行一个 label 字符串）
+输入：可选 `GDA_CACHE_DIR`，否则遵循 GDA/XDG 默认 cache。
 
-- `OUTPUT_DIR/label_clusters.jsonl`
-  - Step 2 生成：聚类映射关系
+输出：
 
-- `OUTPUT_DIR/all_captions.jsonl`
-  - Step 2 生成：每个 sample 的 `track_labels`、`label_ids` 等结构化结果
+- `checkpoints/sam2.1_hiera_large.pt`
+- 仅在文件不存在且下载内容 SHA256 正确时完成安装
+- 若目标已有错误 hash，脚本会报错而不会覆盖
 
-### 2.4 作为下游（process_sdf.py）的输入时要点
+### 2.3 `scripts/build-sam2.py`
 
-- 下游通常需要：
-  - `rgb.mp4`
-  - 每帧对应的 `frame_XXXX.npz` 中的 `annotated_frame_index`
-- 注意：本脚本生成的 `OUTPUT_DIR/labels.txt` 是“每行一个 label 文本”，而 [process_sdf.py](../sdf_compute/process_sdf.py) 的 `load_object_labels()` 当前仅识别形如 `id: name` 的行（否则会忽略）。
-  - 这不会阻止 SDF 计算，但会导致“对象名称”显示为空。
+输入：
 
----
+- `third_party/grounded-sam-2/` 的固定、干净 gitlink checkout
+- `scripts/patches/grounded-sam2-cuda-arch.patch`
+- 当前 Pixi target 的 CUDA toolchain
+- 自动检测的 GPU capability，或显式 `GDA_CUDA_ARCH`
 
-## 3. process_sdf.py
+输出：SAM2 Python 包与 CUDA extension 安装到当前 Pixi 环境。源码复制、patch 和
+编译发生在 `.pixi/gda-build/` 下，不修改 submodule；因此构建后
+`git submodule status --recursive` 仍可用于验证源码状态。
 
-脚本：[sdf_compute/process_sdf.py](../sdf_compute/process_sdf.py)
+### 2.4 `scripts/doctor.py`
 
-### 3.1 入口参数
+输入：已安装的锁定环境、可用 NVIDIA GPU、已编译的 SAM2 extension。
 
-- `--input_dir`（必需）：输入目录（要求包含 `rgb.mp4`，以及分割/标注信息）
-- `--output_dir`（必需）：输出目录
-- `--model_name`：Depth-Anything-3 模型名（默认 `depth-anything/DA3-LARGE`）
-- `--device`：设备（默认：有 CUDA 则 `cuda` 否则 `cpu`）
-- `--max_frames`：最多处理帧数（不传表示全部）
-- `--track_pixels`：要追踪的像素坐标字符串，支持 `x1,y1;x2,y2` 或空格分隔
-- `--video_fps`：输出视频帧率（默认 10.0）
+输出：stdout 打印 PyTorch/CUDA/GPU capability、xFormers 和 SAM2 extension 路径；
+目标 capability 或关键导入不匹配时失败。
 
-### 3.2 主要输入（目录/文件约定）
+## 3. 深度估计：`gda-depth`
 
-`INPUT_DIR/` 下：
+必要输入：
 
-- 必需：`rgb.mp4`
-  - 用于抽帧（保存为临时 PNG），并用于与深度/SDF同步处理
+- `--image`：单张图像
 
-- 必需（至少一种）：每帧的对象 id/label id 图（用于 SDF 计算）
-  - 优先读取：`INPUT_DIR/frame_XXXX/annotated_frame_index.npy`
-  - 若不存在则尝试：`INPUT_DIR/frame_XXXX.npz` 内的 `annotated_frame_index`
+常用可选输入：
 
-- 可选：`labels.txt`
-  - 当前代码仅解析 `"<int> : <name>"` 形式的映射（例如 `3: mug`）
+- `--output-dir`：默认是输入图所在目录
+- `--model-name`：默认 `depth-anything/DA3-LARGE`
+- `--model-revision`：默认固定 revision
+- `--device`、`--colormap`
+- `--save-npy`、`--save-png`
 
-### 3.3 输出（生成的目录/文件）
+输出：
 
-`OUTPUT_DIR/` 下会生成两套模式：`raw/` 与 `filtered/`。
+- `depth.npy`：`float32 [H, W]`
+- `depth.png`：默认彩色深度可视化
 
-此外，脚本在开始阶段会先把视频抽帧到：
-- `OUTPUT_DIR/frames/frame_XXXX.png`（临时/中间产物；不会自动删除）
+## 4. 目标检测：`gda-detect`
 
-**每个模式（raw 或 filtered）下：**
+必要输入：
 
-- `OUTPUT_DIR/{mode}/depths/depth_XXXX.png`：深度图可视化
-- `OUTPUT_DIR/{mode}/frames/frame_XXXX.png`：RGB 帧拷贝
+- `--image`
+- `--prompts`：以逗号、分号或换行分隔，整段应由 shell 引号包裹
 
-- `OUTPUT_DIR/{mode}/sdf_npy/sdf_XXXX.npy`：原始 SDF 数值
-- `OUTPUT_DIR/{mode}/sdf_vis/sdf_XXXX.png`：原始 SDF 可视化
+常用可选输入：
 
-- `OUTPUT_DIR/{mode}/sdf_exp_npy/sdf_exp_XXXX.npy`：指数变换后的 SDF 数值
-- `OUTPUT_DIR/{mode}/sdf_exp_vis/sdf_exp_XXXX.png`：指数变换后的 SDF 可视化
+- `--output-dir`：默认是输入图所在目录
+- `--model-id`、`--model-revision`
+- `--box-th`、`--text-th`、`--device`
 
-- `OUTPUT_DIR/{mode}/depth.gif`、`depth_video.mp4`
-- `OUTPUT_DIR/{mode}/sdf_vis.gif`、`sdf_video.mp4`
-- `OUTPUT_DIR/{mode}/sdf_exp_vis.gif`、`sdf_exp_video.mp4`
-- `OUTPUT_DIR/{mode}/rgb.gif`、`rgb_video.mp4`
+GroundingDINO 对每条 prompt 独立检测，因此实例通过精确 `prompt_ids` 回到原始
+prompt，不依赖 phrase substring 猜测。
 
-- 若启用 `--track_pixels`：
-  - `OUTPUT_DIR/{mode}/pixel_details/pixel_details_XXXX.json`：每帧被追踪像素的详细计算信息
-  - `OUTPUT_DIR/{mode}/pixel_details/pixel_details_summary.json`：所有帧汇总
-  - `OUTPUT_DIR/{mode}/rgb_marked/rgb_marked_XXXX.png`：在 RGB 上标记追踪像素/最近点等
-  - `OUTPUT_DIR/{mode}/rgb_marked.gif`、`rgb_marked_video.mp4`
+输出：
 
-- `OUTPUT_DIR/{mode}/pointcloud.ply`
-  - 将所有帧点云合并后导出（当前不写颜色）
+- `detections.json`
+  - `image_size: [H, W]`
+  - `prompts: list[str]`
+  - `boxes_xyxy: [N, 4]`
+  - `scores: [N]`
+  - `prompt_ids: [N]`
+  - `labels: [N]`
+- `detections_vis.png`
 
----
+## 5. 文本 Grounding 分割：`gda-segment`
 
-## 4. test_single_case.py
+必要输入：
 
-脚本：[sdf_compute/test_single_case.py](../sdf_compute/test_single_case.py)
+- `--image`
+- `--prompts`
 
-### 4.1 入口参数（对外统一入口）
+### 5.1 默认 SAM3
 
-- `--input_dir`（必需）：Bridge 数据集目录（含 episode 子目录）
-- `--episode_id`（必需）：要测试的 episode（例如 `00000`）
-- `--stream_id`：默认 0
-- `--output_base`：默认 `output/test`
-- `--device`：默认 `cuda:0`
-- `--max_frames`：默认 10
-- `--skip_dataset_process`：跳过 bridge 数据集处理
-- `--skip_sdf`：跳过 SDF 计算
-- `--track_pixels`：透传给 process_sdf.py
+`--backend sam3` 直接从文本预测 instances/masks，一张图的多个 prompt 共享一次图像
+编码。可选 `--sam3-checkpoint` 使用本地权重；否则按固定 revision 从 gated
+`facebook/sam3` 获取。跨 prompt 的重复实例按 mask IoU 去重，并在
+`prompt_matches` 中保留全部匹配关系。
 
-### 4.2 输入与输出
+### 5.2 GroundingDINO → SAM2.1 fallback
 
-- 输入：
-  - `INPUT_DIR/{episode_id}/images{stream_id}/im_XXXX.jpg`（或 `image{stream_id}`）
+`--backend sam2` 先产生 boxes，再将 box 直接交给 SAM2.1，不再在框内采点。使用前
+需要执行 `pixi run build-sam2`，并确保 cache 中存在默认 checkpoint；也可用
+`--sam2-checkpoint` 覆盖。
 
-- 输出：
-  - 数据集处理输出：`OUTPUT_BASE/dataset_processed/{episode_id}/images{stream_id}/...`
-    - 来自 brdige_dataset_process_depth.py 的输出
-  - SDF 输出：`OUTPUT_BASE/sdf_processed/{episode_id}/...`
-    - 来自 process_sdf.py 的输出
+两种 backend 写出相同的稳定产物：
 
-- 额外动作：
-  - 若 `OUTPUT_BASE/dataset_processed/labels.txt` 存在，会复制到 `.../images{stream_id}/labels.txt`，以满足 process_sdf.py 的“同目录查找 labels.txt”的约定。
+- `detections.json`
+- `detections_vis.png`
+- `masks.npz`
+  - `masks: bool [N, H, W]`
+  - `boxes_xyxy: float32 [N, 4]`
+  - `prompt_ids: int32 [N]`
+  - `scores: float32 [N]`
+  - `prompts`
+  - `image_size: int32 [2]`
+  - SAM3 去重启用时还包含 `prompt_matches`
+- `masks_meta.json`：backend 与上述数组的 JSON 元数据
+- `masks_vis.png`
 
----
+## 6. 深度与分割主流程：`gda`
 
-## 5. batch_process_full.sh
+必要输入：`--image` 与 `--prompts`。`--seg-backend` 默认为 `sam3`；需要 fallback 时
+设为 `sam2`。`--output-dir` 未提供时写到输入图所在目录。
 
-脚本：[sdf_compute/batch_process_full.sh](../sdf_compute/batch_process_full.sh)
+输出：
 
-### 5.1 作用
+- `depth.npy`
+- `depth.png`
+- `detections.json`
+- `detections_vis.png`
+- `masks.npz`
+- `masks_meta.json`
+- `masks_vis.png`
+- `depth_with_masks.png`
 
-- 对多个 episode 循环调用 [test_single_case.py](../sdf_compute/test_single_case.py)
-- 支持串行/并行（`PARALLEL_JOBS`）
+## 7. 图像到代表位置：`gda-positions`
 
-### 5.2 输入与输出
+必要输入：`--image` 与 `--prompts`。流程依次运行深度估计、grounded segmentation，
+再为每个 mask 选择有效深度中值附近的代表像素。
 
-- 输入：
-  - 依赖脚本内配置：`INPUT_DIR`、`EPISODE_IDS`、`STREAM_ID`、`DEVICE`、`MAX_FRAMES`、`TRACK_PIXELS`
+固定输出：
 
-- 输出：
-  - `OUTPUT_BASE/dataset_processed/`（由 test_single_case -> brdige_dataset_process_depth.py 产生）
-  - `OUTPUT_BASE/sdf_processed/`（由 test_single_case -> process_sdf.py 产生）
+- `positions.npz`：`rep_uvs [N,2]`、`rep_depths [N]`、`valids [N]` 与元数据
+- `positions.json`：便于人工查看的等价表示
 
----
+默认还会保存第 6 节的中间产物；`--no-save-intermediate` 可关闭。启用
+`--make-pointcloud` 时还会输出：
 
-## 6. batch_process_stepwise.sh
+- `pointcloud.npz`
+- `pointcloud.ply`（默认开启）
 
-脚本：[sdf_compute/batch_process_stepwise.sh](../sdf_compute/batch_process_stepwise.sh)
+点云需要通过 `--k-file`，或同时提供 `--fx --fy --cx --cy`。GUI 可视化由
+`--visualize-pointcloud` 开启，在无显示服务器上不应启用。
 
-### 6.1 作用
+## 8. 输出兼容约定
 
-- Step1：一次性批量运行 brdige_dataset_process_depth.py（处理全部 episode）
-- Step2：逐个 episode 运行 process_sdf.py
-- 支持跳过步骤：`SKIP_STEP1` / `SKIP_STEP2`
-
-### 6.2 输入与输出
-
-- Step1 输入：`INPUT_DIR`（Bridge 数据集）
-- Step1 输出：`OUTPUT_BASE/dataset_processed/`（同 brdige_dataset_process_depth.py 的输出结构）
-
-- Step2 输入：`OUTPUT_BASE/dataset_processed/{episode_id}/images{stream_id}/rgb.mp4` + 分割 npz
-- Step2 输出：`OUTPUT_BASE/sdf_processed/{episode_id}/raw` 与 `filtered`
-
----
-
-## 7. install_dependencies.sh
-
-脚本：[sdf_compute/install_dependencies.sh](../sdf_compute/install_dependencies.sh)
-
-### 7.1 输入（历史脚本）
-
-该脚本属于旧的 `sdf_compute` 链路，不再是 GDA 的环境入口。GDA 新环境统一由
-项目根目录的 `pixi.toml` 管理；推荐先运行 `python3 scripts/check-workspace.py`
-和 `pixi install --platform h200|b300 --locked`。不要把下面的 pip 命令混入 Pixi
-环境之外的系统 Python。
-
-- 当前目录需要是 `sdf_compute/`（脚本中使用相对路径）
-- 需要网络访问（仅在维护旧 sdf_compute 链路时）：
-  - `pip install -r requirements.txt`
-  - `git clone https://github.com/IDEA-Research/Grounded-SAM-2.git`
-  - `wget https://dl.fbaipublicfiles.com/.../sam2.1_hiera_large.pt`
-
-### 7.2 输出
-
-- 安装 Python 依赖（写入当前 Python 环境）
-- 生成/更新：
-  - `sdf_compute/thirdparty/grounded_sam_2/`（代码库）
-  - `sdf_compute/thirdparty/grounded_sam_2/checkpoints/sam2.1_hiera_large.pt`（权重）
-- 运行 [test_imports.py](../sdf_compute/test_imports.py) 做导入校验（只输出到 stdout）
-
----
-
-## 8. test_imports.py
-
-脚本：[sdf_compute/test_imports.py](../sdf_compute/test_imports.py)
-
-- 输入：无（依赖当前 Python 环境与本地文件是否存在）
-- 输出：stdout 打印各依赖导入是否成功，以及 `thirdparty/grounded_sam_2/checkpoints/sam2.1_hiera_large.pt` 是否存在
+- Python API 图像统一为 RGB `uint8 [H, W, 3]`。
+- 深度统一转换为 `float32 [H, W]`。
+- masks 统一为 `bool [N, H, W]`。
+- boxes 使用像素坐标 `xyxy`。
+- `prompt_ids[i]` 指向 `prompts`；跨 prompt 去重后以 `prompt_matches[i]` 表示多重匹配。
+- 深度与 mask 分辨率不一致时，位置与点云后处理负责显式对齐。
+- 图像入口 CLI 的 `output_dir` 未设置时默认使用输入图所在目录；独立后处理入口
+  分别使用其 masks/depth 输入所在目录。
