@@ -53,7 +53,12 @@ def load_k_from_json(path: Path) -> np.ndarray:
             return k
         required = ["fx", "fy", "cx", "cy"]
         if all(k in data for k in required):
-            fx, fy, cx, cy = (float(data["fx"]), float(data["fy"]), float(data["cx"]), float(data["cy"]))
+            fx, fy, cx, cy = (
+                float(data["fx"]),
+                float(data["fy"]),
+                float(data["cx"]),
+                float(data["cy"]),
+            )
             return np.asarray([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
     raise ValueError("Invalid intrinsics json: expected {K:[[...]]} or {fx,fy,cx,cy}.")
 
@@ -68,7 +73,6 @@ def load_k(k_path: Path) -> np.ndarray:
         return k
     if k_path.suffix.lower() in {".json"}:
         return load_k_from_json(k_path)
-
 
     # Backward-compatible aliases
     _load_k_from_json = load_k_from_json
@@ -261,7 +265,8 @@ def _maybe_import_open3d():
         return o3d
     except Exception as e:  # pragma: no cover
         raise ImportError(
-            "Open3D is required for saving .ply. Install with: pip install open3d"
+            "Open3D is required for saving .ply. Install the locked Pixi environment "
+            "with `pixi install --locked`."
         ) from e
 
 
@@ -320,7 +325,9 @@ def main() -> None:
         masks = masks_data["masks"].astype(bool)
         masks_meta = {
             "prompts": masks_data["prompts"].tolist() if "prompts" in masks_data else None,
-            "prompt_ids": masks_data["prompt_ids"].tolist() if "prompt_ids" in masks_data else None,
+            "prompt_ids": masks_data["prompt_ids"].tolist()
+            if "prompt_ids" in masks_data
+            else None,
         }
         target_h, target_w = int(masks.shape[1]), int(masks.shape[2])
 
@@ -329,7 +336,9 @@ def main() -> None:
         depth = cv2.resize(depth, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
     # Resize image to target (if provided).
-    if image_rgb is not None and (image_rgb.shape[0] != target_h or image_rgb.shape[1] != target_w):
+    if image_rgb is not None and (
+        image_rgb.shape[0] != target_h or image_rgb.shape[1] != target_w
+    ):
         image_rgb = cv2.resize(image_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
     # Resize masks to target (if provided).

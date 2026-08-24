@@ -1,3 +1,5 @@
+# Legacy requirements file. Use pixi.toml/pixi.lock for the supported runtime.
+# This list is retained only for older sdf_compute scripts.
 # common
 torch>=2
 torchvision

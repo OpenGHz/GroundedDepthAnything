@@ -369,7 +369,8 @@ CLI 脚本约定（建议新文件）：
 
 实现思路（推荐库与方式）：
 - 纯 numpy 也能做，但为了后续可视化/保存更方便，建议使用 `open3d`（用于点云数据结构/导出/显示）。
-- 若环境缺少 `open3d`，按 prepare.md 规则：直接 `pip install open3d`。
+- GDA 环境缺少 `open3d` 时，应重新运行对应 Pixi target（`pixi install --locked`），
+  不要直接向系统 Python 执行 `pip install`。
 
 Config（继承 `pydantic.BaseModel`）建议字段：
 - `depth_scale: float = 1.0`（若深度是米就保持 1；若是 mm 则设为 1000）

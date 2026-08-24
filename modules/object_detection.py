@@ -9,22 +9,30 @@ The detector takes an image and multi-target prompts, and returns boxes.
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
-
-import time
 
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
 from gda.datatypes import DetectionResult
+
+
+def _import_grounding_dino_components():
+    """Import Transformers lazily so offline flags can be configured first."""
+
+    try:
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+    except ImportError as exc:  # pragma: no cover - runtime dependency
+        raise ImportError("GroundingDINO dependencies are missing. Run `pixi install`.") from exc
+    return AutoModelForZeroShotObjectDetection, AutoProcessor
 
 
 class ObjectDetectionConfig(BaseModel):
@@ -53,9 +61,10 @@ class GroundingDinoDetector:
         self.device = torch.device(config.device)
 
         logger = logging.getLogger("gda.det")
+        model_type, processor_type = _import_grounding_dino_components()
         logger.info("loading GroundingDINO processor=%s", config.model_id)
         t0 = time.perf_counter()
-        self.processor = AutoProcessor.from_pretrained(
+        self.processor = processor_type.from_pretrained(
             config.model_id,
             local_files_only=bool(config.hf_local_files_only),
         )
@@ -64,7 +73,7 @@ class GroundingDinoDetector:
         logger.info("loading GroundingDINO model=%s device=%s", config.model_id, config.device)
         t0 = time.perf_counter()
         self.model = (
-            AutoModelForZeroShotObjectDetection.from_pretrained(
+            model_type.from_pretrained(
                 config.model_id,
                 local_files_only=bool(config.hf_local_files_only),
             )
@@ -91,7 +100,8 @@ class GroundingDinoDetector:
               - labels: list[str] (N) raw labels returned by model
         """
 
-        if not prompts:
+        clean_prompts = [prompt.strip() for prompt in prompts if prompt.strip()]
+        if not clean_prompts:
             raise ValueError("prompts must be non-empty")
 
         if isinstance(image_rgb, Image.Image):
@@ -105,51 +115,61 @@ class GroundingDinoDetector:
             image = Image.fromarray(arr, mode="RGB")
         w, h = image.size
 
-        text = ". ".join([p.strip() for p in prompts if p.strip()])
-        if not text.endswith("."):
-            text = text + "."
+        # Run one prompt at a time. GroundingDINO's post-processing returns a
+        # token phrase, not a stable category index; combining prompts and then
+        # guessing ownership from substring matches silently mislabels overlaps
+        # such as "car"/"car wheel". The extra forwards only affect the explicit
+        # SAM2 fallback; native SAM3 remains the default multi-prompt path.
+        boxes_parts: list[np.ndarray] = []
+        scores_parts: list[np.ndarray] = []
+        labels_list: list[str] = []
+        prompt_ids_parts: list[np.ndarray] = []
+        for prompt_id, prompt in enumerate(clean_prompts):
+            text = prompt if prompt.endswith(".") else f"{prompt}."
+            inputs = self.processor(images=image, text=text, return_tensors="pt").to(self.device)
+            outputs = self.model(**inputs)
+            results = self.processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                threshold=self.config.box_threshold,
+                text_threshold=self.config.text_threshold,
+                target_sizes=[(h, w)],
+            )
+            result = results[0]
+            boxes = result.get("boxes")
+            scores = result.get("scores")
+            labels = result.get("labels")
+            if boxes is None or scores is None:
+                raise RuntimeError("Unexpected GroundingDINO postprocess output")
+            boxes_np = boxes.detach().cpu().numpy().astype(np.float32).reshape(-1, 4)
+            scores_np = scores.detach().cpu().numpy().astype(np.float32).reshape(-1)
+            labels_for_prompt = [str(label) for label in labels] if labels is not None else []
+            if len(labels_for_prompt) != len(scores_np):
+                labels_for_prompt = [prompt] * len(scores_np)
+            boxes_parts.append(boxes_np)
+            scores_parts.append(scores_np)
+            labels_list.extend(labels_for_prompt)
+            prompt_ids_parts.append(np.full(len(scores_np), prompt_id, dtype=np.int32))
 
-        inputs = self.processor(images=image, text=text, return_tensors="pt").to(
-            self.device
+        boxes_np = (
+            np.concatenate(boxes_parts, axis=0)
+            if boxes_parts
+            else np.zeros((0, 4), dtype=np.float32)
         )
-        outputs = self.model(**inputs)
-        results = self.processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=self.config.box_threshold,
-            text_threshold=self.config.text_threshold,
-            target_sizes=[(h, w)],
+        scores_np = (
+            np.concatenate(scores_parts, axis=0)
+            if scores_parts
+            else np.zeros((0,), dtype=np.float32)
         )
-        r0 = results[0]
-
-        boxes = r0.get("boxes")
-        scores = r0.get("scores")
-        labels = r0.get("labels")
-
-        if boxes is None or scores is None:
-            raise RuntimeError("Unexpected GroundingDINO postprocess output")
-
-        boxes_np = boxes.detach().cpu().numpy().astype(np.float32)
-        scores_np = scores.detach().cpu().numpy().astype(np.float32)
-        labels_list = [str(x) for x in (labels or [])]
-
-        prompts_norm = [p.strip().lower() for p in prompts]
-        prompt_ids: list[int] = []
-        for lbl in labels_list:
-            lbl_n = lbl.strip().lower()
-            pid = -1
-            if lbl_n in prompts_norm:
-                pid = prompts_norm.index(lbl_n)
-            else:
-                for i, p in enumerate(prompts_norm):
-                    if p and (p in lbl_n or lbl_n in p):
-                        pid = i
-                        break
-            prompt_ids.append(pid)
+        prompt_ids = (
+            np.concatenate(prompt_ids_parts, axis=0)
+            if prompt_ids_parts
+            else np.zeros((0,), dtype=np.int32)
+        )
 
         return DetectionResult(
             image_size=(int(h), int(w)),
-            prompts=list(prompts),
+            prompts=clean_prompts,
             boxes_xyxy=boxes_np,
             scores=scores_np,
             prompt_ids=np.asarray(prompt_ids, dtype=np.int32),
@@ -187,8 +207,8 @@ def _parse_prompts(prompts: str) -> list[str]:
 
     Accepts separators: ';' or ',' (and also newlines).
 
-    Note: when running via `conda run`, unquoted semicolons may be interpreted
-    by the shell because `conda run` generates a temporary script. Commas are
+    Note: when passing prompts through a shell runner, unquoted semicolons may be
+    interpreted as command separators. Commas are
     safer in that case.
     """
 
@@ -245,7 +265,9 @@ def _draw_boxes(image: Image.Image, det: dict[str, Any]) -> Image.Image:
         color = palette[pid % len(palette)] if pid >= 0 else (255, 255, 255)
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
 
-        label = prompts[pid] if (pid is not None and pid >= 0 and pid < len(prompts)) else "unknown"
+        label = (
+            prompts[pid] if (pid is not None and pid >= 0 and pid < len(prompts)) else "unknown"
+        )
         text = f"{label} {score:.2f}"
         if font is not None:
             draw.text((x1 + 3, y1 + 3), text, fill=color, font=font)

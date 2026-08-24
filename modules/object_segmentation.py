@@ -1,4 +1,4 @@
-"""Object segmentation (mask) module for a single image.
+"""Box-prompted object segmentation for a single image.
 
 This module consumes:
 - an image
@@ -8,9 +8,8 @@ It outputs:
 - masks.npz (boolean masks and metadata)
 - masks_vis.png (overlay visualization)
 
-Backends:
-- sam2 (default): uses the local Grounded-SAM-2 code under sdf_compute/thirdparty.
-- sam3: uses the local sam3 repo.
+Backend:
+- SAM 2.1 from the local Grounded-SAM-2 checkout.
 
 Notes:
 - This module follows prompts/prepare.md:
@@ -22,8 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,20 +31,12 @@ import numpy as np
 import torch
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import CliApp
 
 from gda.datatypes import DetectionResult, SegmentationResult
+from gda.modules.workspace import workspace_root
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-
-_SAM2_ROOT = _REPO_ROOT / "sdf_compute" / "thirdparty" / "grounded_sam_2"
-if not _SAM2_ROOT.exists():
-    raise FileNotFoundError(
-        f"SAM2 repo path not found: {_SAM2_ROOT}. Please check the workspace layout."
-    )
-if str(_SAM2_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SAM2_ROOT))
-
+_REPO_ROOT = workspace_root()
 
 _DEFAULT_SAM2_CHECKPOINT = (
     _REPO_ROOT
@@ -57,55 +48,55 @@ _DEFAULT_SAM2_CHECKPOINT = (
 )
 _DEFAULT_SAM2_MODEL_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
-
-from sam2.build_sam import build_sam2  # noqa: E402
-from sam2.sam2_image_predictor import SAM2ImagePredictor  # noqa: E402
+Sam2AutocastDtype = Literal["none", "bfloat16", "float16"]
 
 
-def _import_sam3_builder():
-    """Import SAM3 builder lazily.
-
-    SAM3 is an optional backend; importing it at module import time would:
-    - slow down `--help`
-    - trigger warnings
-    - fail even when using the default SAM2 backend
-    """
-
-    sam3_repo_root = _REPO_ROOT / "sam3"
-    if not sam3_repo_root.exists():
-        raise FileNotFoundError(
-            f"sam3 repo path not found: {sam3_repo_root}. Please check the workspace layout."
-        )
-    if str(sam3_repo_root) not in sys.path:
-        sys.path.insert(0, str(sam3_repo_root))
+def _import_sam2_components():
+    """Import SAM2 lazily so SAM3-only commands do not require it."""
 
     try:
-        from sam3.model_builder import build_sam3_image_model  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise ImportError(
-            "Failed to import sam3. Please ensure the sam3 repo dependencies are installed."
-        ) from e
+        from sam2.build_sam import build_sam2
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+    except ImportError:
+        sam2_root = _REPO_ROOT / "sdf_compute" / "thirdparty" / "grounded_sam_2"
+        if not sam2_root.exists():
+            raise FileNotFoundError(
+                f"SAM2 repo path not found: {sam2_root}. Please check the workspace layout."
+            )
 
-    return build_sam3_image_model
+        import sys
+
+        sys.path.insert(0, str(sam2_root))
+        try:
+            from sam2.build_sam import build_sam2
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+        except ImportError as exc:  # pragma: no cover - depends on optional runtime
+            raise ImportError(
+                "Failed to import SAM2. Run `pixi install` from the gda repository."
+            ) from exc
+
+    return build_sam2, SAM2ImagePredictor
 
 
-class ObjectSegmentationConfig(BaseModel):
+class ObjectSegmentationConfig(BaseModel, frozen=True):
     """Configuration for mask segmentation from boxes."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
-    backend: Literal["sam2", "sam3"] = "sam2"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    """Torch device used by SAM2."""
 
-    # sam2
     sam2_checkpoint: Path = _DEFAULT_SAM2_CHECKPOINT
-    sam2_model_cfg: str = _DEFAULT_SAM2_MODEL_CFG
-    sam2_multimask_output: bool = False
+    """Path to the SAM2.1 checkpoint."""
 
-    # sam3
-    sam3_checkpoint: Path | None = None
-    sam3_load_from_hf: bool = False
-    sam3_multimask_output: bool = False
+    sam2_model_cfg: str = _DEFAULT_SAM2_MODEL_CFG
+    """Hydra model configuration bundled with SAM2."""
+
+    sam2_multimask_output: bool = False
+    """Generate three candidates per box and retain the best predicted-IoU mask."""
+
+    autocast_dtype: Sam2AutocastDtype = "bfloat16"
+    """CUDA automatic mixed-precision dtype; CPU inference ignores this setting."""
 
 
 class Sam2BoxSegmentor:
@@ -130,14 +121,23 @@ class Sam2BoxSegmentor:
             config.device,
         )
         t0 = time.perf_counter()
-        device = config.device
+        build_sam2, sam2_image_predictor = _import_sam2_components()
         self.model = build_sam2(
             config.sam2_model_cfg,
             ckpt_path=str(config.sam2_checkpoint),
-            device=device,
+            device=config.device,
         )
-        self.predictor = SAM2ImagePredictor(self.model)
+        self.predictor = sam2_image_predictor(self.model)
         logger.info("SAM2 ready in %.2fs", time.perf_counter() - t0)
+
+    def _autocast_context(self):
+        if not str(self.config.device).startswith("cuda") or self.config.autocast_dtype == "none":
+            return nullcontext()
+        dtype = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+        }[self.config.autocast_dtype]
+        return torch.autocast(device_type="cuda", dtype=dtype)
 
     @torch.no_grad()
     def segment(
@@ -175,34 +175,59 @@ class Sam2BoxSegmentor:
             det_obj = det
 
         boxes = np.asarray(det_obj.boxes_xyxy, dtype=np.float32)
+        if tuple(map(int, det_obj.image_size)) != (int(h), int(w)):
+            raise ValueError(
+                "Detection image_size does not match the input image: "
+                f"detection={det_obj.image_size}, image={(h, w)}"
+            )
+        num_detections = len(boxes) if boxes.ndim > 0 else 0
+        if not (
+            len(np.asarray(det_obj.scores).reshape(-1))
+            == len(np.asarray(det_obj.prompt_ids).reshape(-1))
+            == len(det_obj.labels)
+            == num_detections
+        ):
+            raise ValueError(
+                "Detection boxes, scores, prompt_ids, and labels must have equal length"
+            )
         if boxes.size == 0:
             masks_arr = np.zeros((0, h, w), dtype=bool)
             scores_np = np.zeros((0,), dtype=np.float32)
         else:
             if boxes.ndim != 2 or boxes.shape[1] != 4:
                 raise ValueError("det.boxes_xyxy must be N x 4")
+            if not np.isfinite(boxes).all():
+                raise ValueError("det.boxes_xyxy must contain only finite coordinates")
 
-            self.predictor.set_image(image_np)
-            masks, scores_np, _ = self.predictor.predict(
-                point_coords=None,
-                point_labels=None,
-                box=boxes,
-                multimask_output=self.config.sam2_multimask_output,
+            with self._autocast_context():
+                self.predictor.set_image(image_np)
+                masks, scores_np, _ = self.predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    box=boxes,
+                    multimask_output=self.config.sam2_multimask_output,
+                )
+
+            masks, scores_np = self._normalize_predictor_output(
+                masks=masks,
+                scores=scores_np,
+                num_boxes=len(boxes),
+                image_size=(h, w),
             )
-
-            # Normalize shapes
-            if masks.ndim == 4 and masks.shape[1] == 1:
-                masks = masks[:, 0]
-                scores_np = np.asarray(scores_np).reshape(-1)
 
             if self.config.sam2_multimask_output:
                 # masks: [N, C, H, W], scores: [N, C]
                 best = np.argmax(scores_np, axis=1)
                 masks = masks[np.arange(masks.shape[0]), best]
                 scores_np = scores_np[np.arange(scores_np.shape[0]), best]
+            else:
+                # The predictor still exposes a candidate dimension for some
+                # SAM2 versions, even when multimask output is disabled.
+                masks = masks[:, 0]
+                scores_np = scores_np[:, 0]
 
-            masks_arr = masks.astype(bool)
-            scores_np = np.asarray(scores_np).reshape(-1).astype(np.float32)
+            masks_arr = masks.astype(bool, copy=False)
+            scores_np = np.asarray(scores_np, dtype=np.float32).reshape(-1)
 
         return SegmentationResult(
             backend="sam2",
@@ -212,124 +237,97 @@ class Sam2BoxSegmentor:
             prompt_ids=np.asarray(det_obj.prompt_ids, dtype=np.int32),
             scores=scores_np,
             masks=masks_arr.astype(bool),
+            prompt_matches=det_obj.prompt_matches,
         )
 
-    @torch.no_grad()
-    def segment_from_path(self, image_path: str | Path, det: DetectionResult | dict[str, Any]) -> SegmentationResult:
-        """Backward-compatible helper: load image from path then call segment()."""
+    @staticmethod
+    def _normalize_predictor_output(
+        masks: Any,
+        scores: Any,
+        num_boxes: int,
+        image_size: tuple[int, int],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Normalize SAM2 predictor output to ``[N,C,H,W]`` and ``[N,C]``.
 
-        image_path = Path(image_path)
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
-        image = Image.open(image_path).convert("RGB")
-        return self.segment(image, det)
-
-
-class Sam3BoxSegmentor:
-    """Segment objects from bounding boxes using SAM3 interactive predictor."""
-
-    def __init__(self, config: ObjectSegmentationConfig):
-        """Create segmentor.
-
-        Args:
-            config: SAM3 checkpoint/device options.
+        SAM2 releases differ in whether singleton batch and candidate axes are
+        squeezed. In particular, one box with ``multimask_output=True`` may be
+        returned as ``[C,H,W]``/``[C]`` rather than ``[1,C,H,W]``/``[1,C]``.
+        Normalizing before selecting the best candidate keeps both paths safe.
         """
 
-        self.config = config
+        def to_numpy(value: Any) -> np.ndarray:
+            if isinstance(value, torch.Tensor):
+                tensor = value.detach().cpu()
+                if tensor.is_floating_point() and tensor.dtype == torch.bfloat16:
+                    tensor = tensor.float()
+                return tensor.numpy()
+            return np.asarray(value)
 
-        logger = logging.getLogger("gda.seg")
-        logger.info(
-            "building SAM3 checkpoint=%s load_from_hf=%s device=%s",
-            config.sam3_checkpoint,
-            config.sam3_load_from_hf,
-            config.device,
-        )
-        t0 = time.perf_counter()
-        build_sam3_image_model = _import_sam3_builder()
+        height, width = image_size
+        masks_np = to_numpy(masks)
+        scores_np = to_numpy(scores)
 
-        self.model = build_sam3_image_model(
-            device="cuda" if str(config.device).startswith("cuda") else "cpu",
-            checkpoint_path=str(config.sam3_checkpoint) if config.sam3_checkpoint else None,
-            load_from_HF=config.sam3_load_from_hf,
-            enable_segmentation=False,
-            enable_inst_interactivity=True,
-        )
-        logger.info("SAM3 ready in %.2fs", time.perf_counter() - t0)
-        predictor = getattr(self.model, "inst_interactive_predictor", None)
-        if predictor is None:
-            raise RuntimeError("SAM3 model does not expose inst_interactive_predictor")
-        self.predictor = predictor
+        if num_boxes <= 0:
+            return (
+                np.zeros((0, 1, height, width), dtype=bool),
+                np.zeros((0, 1), dtype=np.float32),
+            )
 
-    @torch.no_grad()
-    def segment(
-        self, image_rgb: np.ndarray | Image.Image, det: DetectionResult | dict[str, Any]
-    ) -> SegmentationResult:
-        """Generate masks from detection boxes using SAM3.
-
-        Args:
-            image_rgb: Input image as RGB (numpy uint8 array [H,W,3] or PIL Image).
-            det: Detection result dict (from object_detection.py).
-
-        Returns:
-            (meta, masks)
-            - meta: JSON-serializable dict
-            - masks: boolean numpy array with shape [N, H, W]
-        """
-
-        if isinstance(image_rgb, Image.Image):
-            image_np = np.array(image_rgb.convert("RGB"), dtype=np.uint8)
-        else:
-            image_np = np.asarray(image_rgb)
-            if image_np.ndim != 3 or image_np.shape[2] != 3:
-                raise ValueError(f"image_rgb must have shape [H,W,3], got {image_np.shape}")
-            if image_np.dtype != np.uint8:
-                image_np = image_np.astype(np.uint8)
-        h, w = image_np.shape[:2]
-
-        if isinstance(det, dict):
-            det_obj = DetectionResult.from_json_dict(det)
-        else:
-            det_obj = det
-
-        boxes = np.asarray(det_obj.boxes_xyxy, dtype=np.float32)
-        if boxes.size == 0:
-            masks_arr = np.zeros((0, h, w), dtype=bool)
-            scores_np = np.zeros((0,), dtype=np.float32)
-        else:
-            if boxes.ndim != 2 or boxes.shape[1] != 4:
-                raise ValueError("det.boxes_xyxy must be N x 4")
-
-            self.predictor.set_image(image_np)
-
-            masks_list = []
-            scores = []
-            for box in boxes:
-                masks, ious, _ = self.predictor.predict(
-                    box=box,
-                    multimask_output=self.config.sam3_multimask_output,
-                    return_logits=False,
-                    normalize_coords=True,
+        if masks_np.ndim == 2:
+            masks_np = masks_np[None, None]
+        elif masks_np.ndim == 3:
+            if masks_np.shape[-2:] != (height, width):
+                raise RuntimeError(f"Unexpected SAM2 mask shape: {masks_np.shape}")
+            if num_boxes == 1:
+                # Squeezed batch: [C,H,W].
+                masks_np = masks_np[None]
+            elif masks_np.shape[0] == num_boxes:
+                # Squeezed candidate axis: [N,H,W].
+                masks_np = masks_np[:, None]
+            else:
+                raise RuntimeError(
+                    f"SAM2 returned {masks_np.shape[0]} masks for {num_boxes} boxes"
                 )
-                if masks.ndim != 3:
-                    raise RuntimeError("Unexpected mask shape from SAM3 predictor")
-                masks_list.append(masks[0].astype(bool))
-                scores.append(float(ious[0]) if np.size(ious) > 0 else 0.0)
+        elif masks_np.ndim == 4:
+            if masks_np.shape[0] != num_boxes:
+                raise RuntimeError(
+                    f"SAM2 returned {masks_np.shape[0]} mask batches for {num_boxes} boxes"
+                )
+        else:
+            raise RuntimeError(f"Unexpected SAM2 mask shape: {masks_np.shape}")
 
-            masks_arr = np.stack(masks_list, axis=0)
-            scores_np = np.asarray(scores, dtype=np.float32).reshape(-1)
+        if masks_np.shape[0] != num_boxes or masks_np.shape[-2:] != (height, width):
+            raise RuntimeError(f"Unexpected SAM2 mask shape: {masks_np.shape}")
+        masks_np = masks_np.astype(bool, copy=False)
+        candidates = masks_np.shape[1]
 
-        return SegmentationResult(
-            backend="sam3",
-            image_size=(int(h), int(w)),
-            prompts=list(det_obj.prompts),
-            boxes_xyxy=np.asarray(det_obj.boxes_xyxy, dtype=np.float32),
-            prompt_ids=np.asarray(det_obj.prompt_ids, dtype=np.int32),
-            scores=scores_np,
-            masks=masks_arr.astype(bool),
-        )
+        if scores_np.ndim == 0:
+            scores_np = scores_np.reshape(1, 1)
+        elif scores_np.ndim == 1:
+            if num_boxes == 1:
+                # Squeezed batch: [C].
+                scores_np = scores_np[None]
+            elif scores_np.shape[0] == num_boxes:
+                # Squeezed candidate axis: [N].
+                scores_np = scores_np[:, None]
+            else:
+                raise RuntimeError(
+                    f"SAM2 returned {scores_np.shape[0]} scores for {num_boxes} boxes"
+                )
+        elif scores_np.ndim != 2:
+            raise RuntimeError(f"Unexpected SAM2 score shape: {scores_np.shape}")
+
+        if scores_np.shape != (num_boxes, candidates):
+            raise RuntimeError(
+                "SAM2 returned inconsistent masks and scores: "
+                f"masks={masks_np.shape}, scores={scores_np.shape}"
+            )
+        return masks_np, scores_np.astype(np.float32, copy=False)
 
     @torch.no_grad()
-    def segment_from_path(self, image_path: str | Path, det: DetectionResult | dict[str, Any]) -> SegmentationResult:
+    def segment_from_path(
+        self, image_path: str | Path, det: DetectionResult | dict[str, Any]
+    ) -> SegmentationResult:
         """Backward-compatible helper: load image from path then call segment()."""
 
         image_path = Path(image_path)
@@ -339,26 +337,34 @@ class Sam3BoxSegmentor:
         return self.segment(image, det)
 
 
-class ObjectSegmentationCLI(BaseSettings):
+class ObjectSegmentationArgs(BaseModel):
     """CLI arguments for object segmentation."""
 
-    model_config = SettingsConfigDict(cli_parse_args=True, extra="ignore")
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     image: Path
-    detection_json: Path
-    output_dir: Path | None = None
+    """Input image path."""
 
-    backend: Literal["sam2", "sam3"] = "sam2"
+    detection_json: Path
+    """GroundingDINO detection JSON containing XYXY boxes."""
+
+    output_dir: Path | None = None
+    """Output directory; defaults to the image directory."""
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    """Torch device used by SAM2."""
 
     sam2_checkpoint: Path = _DEFAULT_SAM2_CHECKPOINT
-    sam2_model_cfg: str = _DEFAULT_SAM2_MODEL_CFG
-    sam2_multimask_output: bool = False
+    """Path to the SAM2.1 checkpoint."""
 
-    sam3_checkpoint: Path | None = None
-    sam3_load_from_hf: bool = False
-    sam3_multimask_output: bool = False
+    sam2_model_cfg: str = _DEFAULT_SAM2_MODEL_CFG
+    """SAM2 Hydra model configuration."""
+
+    sam2_multimask_output: bool = False
+    """Retain the best of three candidate masks per box."""
+
+    sam2_autocast_dtype: Sam2AutocastDtype = "bfloat16"
+    """SAM2 CUDA autocast dtype."""
 
 
 def _resolve_output_dir(image_path: Path, output_dir: Path | None) -> Path:
@@ -401,10 +407,10 @@ def _overlay_masks(image_rgb: np.ndarray, masks: np.ndarray, prompt_ids: list[in
     return out
 
 
-def main() -> None:
+def main(cli_args: list[str] | None = None) -> None:
     """CLI entrypoint."""
 
-    args = ObjectSegmentationCLI()
+    args = CliApp.run(ObjectSegmentationArgs, cli_args=cli_args)
     if not args.image.exists():
         raise FileNotFoundError(f"Image not found: {args.image}")
     if not args.detection_json.exists():
@@ -420,25 +426,13 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     config = ObjectSegmentationConfig(
-        backend=args.backend,
         device=args.device,
         sam2_checkpoint=args.sam2_checkpoint,
         sam2_model_cfg=args.sam2_model_cfg,
         sam2_multimask_output=args.sam2_multimask_output,
-        sam3_checkpoint=args.sam3_checkpoint,
-        sam3_load_from_hf=args.sam3_load_from_hf,
-        sam3_multimask_output=args.sam3_multimask_output,
+        autocast_dtype=args.sam2_autocast_dtype,
     )
-
-    if config.backend == "sam3":
-        if config.sam3_load_from_hf and config.sam3_checkpoint is None:
-            raise RuntimeError(
-                "SAM3 backend requires checkpoint access. Either provide --sam3_checkpoint "
-                "to a local checkpoint, or authenticate to HuggingFace and use --sam3_load_from_hf true."
-            )
-        segmentor = Sam3BoxSegmentor(config)
-    else:
-        segmentor = Sam2BoxSegmentor(config)
+    segmentor = Sam2BoxSegmentor(config)
 
     seg = segmentor.segment(image_rgb, det)
 

@@ -211,12 +211,17 @@ def main() -> None:
             "mask_index": i,
             "valid": bool(result.valids[i]),
             "rep_uv": result.rep_uvs[i].tolist(),
-            "rep_depth": float(result.rep_depths[i]) if np.isfinite(result.rep_depths[i]) else None,
+            "rep_depth": float(result.rep_depths[i])
+            if np.isfinite(result.rep_depths[i])
+            else None,
             "num_valid": int(result.meta["num_valid"][i]),
         }
         if prompt_ids is not None and i < len(prompt_ids):
-            item["prompt_id"] = int(prompt_ids[i])
-        if prompts is not None and i < len(prompts):
+            prompt_id = int(prompt_ids[i])
+            item["prompt_id"] = prompt_id
+            if prompts is not None and 0 <= prompt_id < len(prompts):
+                item["prompt"] = str(prompts[prompt_id])
+        elif prompts is not None and i < len(prompts):
             item["prompt"] = str(prompts[i])
         per_mask.append(item)
 

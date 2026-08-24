@@ -237,10 +237,15 @@
 
 脚本：[sdf_compute/install_dependencies.sh](../sdf_compute/install_dependencies.sh)
 
-### 7.1 输入
+### 7.1 输入（历史脚本）
+
+该脚本属于旧的 `sdf_compute` 链路，不再是 GDA 的环境入口。GDA 新环境统一由
+项目根目录的 `pixi.toml` 管理；推荐先运行 `python3 scripts/check-workspace.py`
+和 `pixi install --platform h200|b300 --locked`。不要把下面的 pip 命令混入 Pixi
+环境之外的系统 Python。
 
 - 当前目录需要是 `sdf_compute/`（脚本中使用相对路径）
-- 需要网络访问：
+- 需要网络访问（仅在维护旧 sdf_compute 链路时）：
   - `pip install -r requirements.txt`
   - `git clone https://github.com/IDEA-Research/Grounded-SAM-2.git`
   - `wget https://dl.fbaipublicfiles.com/.../sam2.1_hiera_large.pt`
@@ -261,4 +266,3 @@
 
 - 输入：无（依赖当前 Python 环境与本地文件是否存在）
 - 输出：stdout 打印各依赖导入是否成功，以及 `thirdparty/grounded_sam_2/checkpoints/sam2.1_hiera_large.pt` 是否存在
-

@@ -32,7 +32,8 @@ def _maybe_import_open3d():
         return o3d
     except Exception as e:  # pragma: no cover
         raise ImportError(
-            "Open3D is required for visualization. Install with: pip install open3d"
+            "Open3D is required for visualization. Install the locked Pixi environment "
+            "with `pixi install --locked`."
         ) from e
 
 
@@ -49,14 +50,20 @@ class PointCloudVisualizer:
     def __init__(self, config: PointCloudVisualizationConfig):
         self.config = config
 
-    def visualize(self, points_xyz: np.ndarray, colors: np.ndarray | None, rep_point_indices: np.ndarray | None) -> None:
+    def visualize(
+        self,
+        points_xyz: np.ndarray,
+        colors: np.ndarray | None,
+        rep_point_indices: np.ndarray | None,
+    ) -> None:
         o3d = _maybe_import_open3d()
 
         # Fail fast on common headless setups.
         if os.name != "nt":
             if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
                 raise RuntimeError(
-                    "Open3D visualization requires a GUI display, but DISPLAY/WAYLAND_DISPLAY is not set. "
+                    "Open3D visualization requires a GUI display, but "
+                    "DISPLAY/WAYLAND_DISPLAY is not set. "
                     "Run without visualization, or use X11 forwarding / a desktop session."
                 )
 
@@ -81,7 +88,9 @@ class PointCloudVisualizer:
                 if pi < 0 or pi >= points_xyz.shape[0]:
                     continue
                 center = np.asarray(points_xyz[pi], dtype=np.float64)
-                sph = o3d.geometry.TriangleMesh.create_sphere(radius=float(self.config.rep_sphere_radius))
+                sph = o3d.geometry.TriangleMesh.create_sphere(
+                    radius=float(self.config.rep_sphere_radius)
+                )
                 sph.translate(center)
                 sph.paint_uniform_color([1.0, 0.0, 0.0])
                 geoms.append(sph)
@@ -92,7 +101,8 @@ class PointCloudVisualizer:
         if not ok:
             vis.destroy_window()
             raise RuntimeError(
-                "Open3D failed to create a window. This is commonly caused by missing/invalid display setup "
+                "Open3D failed to create a window. This is commonly caused by "
+                "missing/invalid display setup "
                 "(e.g., no X server, bad DISPLAY, or headless environment)."
             )
         for g in geoms:

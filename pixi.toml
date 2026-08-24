@@ -1,0 +1,73 @@
+[workspace]
+name = "grounded-depth-anything"
+version = "0.2.0"
+description = "Reproducible H200/B300 environment for GDA with native SAM3 concept segmentation"
+channels = ["conda-forge"]
+requires-pixi = ">=0.77"
+platforms = [
+  { name = "h200", platform = "linux-64", cuda = { driver = "12.8", arch = "9.0" } },
+  { name = "b300", platform = "linux-64", cuda = { driver = "13.0", arch = "10.3" } },
+]
+
+[dependencies]
+python = "3.12.*"
+git = "*"
+cmake = "*"
+ninja = "*"
+cuda-nvcc = "12.8.*"
+cuda-libraries-dev = "12.8.*"
+cxx-compiler = "*"
+pip = "*"
+setuptools = ">=75,<75.9"
+wheel = "*"
+open3d = "0.19.*"
+numpy = "1.26.*"
+
+[activation.env]
+TORCH_CUDA_ARCH_LIST = "9.0"
+GDA_EXPECTED_CUDA_ARCH = "9.0"
+SAM2_BUILD_CUDA = "1"
+SAM2_BUILD_ALLOW_ERRORS = "0"
+PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
+TOKENIZERS_PARALLELISM = "false"
+
+[pypi-dependencies]
+torch = { version = "==2.10.0", index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { version = "==0.25.0", index = "https://download.pytorch.org/whl/cu128" }
+triton = "==3.6.0"
+xformers = "==0.0.35"
+flash-attn-3 = { version = "==3.0.0", index = "https://download.pytorch.org/whl/cu128" }
+grounded-depth-anything = { path = ".", editable = true }
+depth-anything-3 = { path = "../Depth-Anything-3", editable = true }
+sam3 = { path = "../sam3", editable = true }
+addict = ">=2.4,<3"
+pycocotools = ">=2.0.8,<3"
+psutil = ">=5.9,<8"
+pytest = ">=9,<10"
+ruff = ">=0.15,<0.16"
+
+[target.b300.dependencies]
+cuda-nvcc = "13.0.*"
+cuda-libraries-dev = "13.0.*"
+
+[target.b300.pypi-dependencies]
+torch = { version = "==2.10.0", index = "https://download.pytorch.org/whl/cu130" }
+torchvision = { version = "==0.25.0", index = "https://download.pytorch.org/whl/cu130" }
+flash-attn-3 = { version = "==3.0.0", index = "https://download.pytorch.org/whl/cu130" }
+xformers = { version = "==0.0.35", index = "https://download.pytorch.org/whl/cu130" }
+
+[target.b300.activation.env]
+TORCH_CUDA_ARCH_LIST = "10.3"
+GDA_EXPECTED_CUDA_ARCH = "10.3"
+
+[tasks]
+workspace-check = { cmd = "python scripts/check-workspace.py", description = "Check pinned sibling repositories" }
+segment = { cmd = "gda-segment", description = "Run grounded image segmentation; append CLI arguments" }
+pipeline = { cmd = "gda", description = "Run depth plus grounded segmentation; append CLI arguments" }
+positions = { cmd = "gda-positions", description = "Run the image-to-3D-position pipeline; append CLI arguments" }
+format = { cmd = "ruff format .", description = "Format GDA Python code" }
+lint = { cmd = "ruff check .", description = "Lint GDA Python code" }
+test = { cmd = "pytest -q", description = "Run CPU unit tests without model downloads" }
+build-sam2 = { cmd = "python scripts/build-sam2.py", description = "Build the vendored SAM2 CUDA extension for the detected GPU" }
+doctor = { cmd = "python scripts/doctor.py", depends-on = ["build-sam2"], description = "Verify the CUDA runtime and compiled SAM2 extension" }
+verify = { depends-on = ["lint", "test", "doctor"], description = "Run all code and GPU environment checks" }

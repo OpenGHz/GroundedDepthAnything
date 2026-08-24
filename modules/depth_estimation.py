@@ -12,7 +12,6 @@ Outputs:
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from pathlib import Path
 from typing import Literal
@@ -25,17 +24,14 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DA3_SRC = _REPO_ROOT / "Depth-Anything-3" / "src"
-if not _DA3_SRC.exists():
-    raise FileNotFoundError(
-        f"Depth-Anything-3 source path not found: {_DA3_SRC}. "
-        "Please check the workspace layout."
-    )
-if str(_DA3_SRC) not in sys.path:
-    sys.path.insert(0, str(_DA3_SRC))
+def _import_depth_anything3():
+    """Import DA3 lazily so Hugging Face offline settings take effect first."""
 
-from depth_anything_3.api import DepthAnything3  # noqa: E402
+    try:
+        from depth_anything_3.api import DepthAnything3
+    except ImportError as exc:  # pragma: no cover - runtime dependency
+        raise ImportError("Depth-Anything-3 is missing. Run `pixi install`.") from exc
+    return DepthAnything3
 
 
 class DepthEstimationConfig(BaseModel):
@@ -65,7 +61,8 @@ class DepthEstimatorDA3:
         logger = logging.getLogger("gda.depth")
         t0 = time.perf_counter()
         logger.info("loading DA3 model=%s device=%s", config.model_name, config.device)
-        self.model = DepthAnything3.from_pretrained(
+        model_type = _import_depth_anything3()
+        self.model = model_type.from_pretrained(
             config.model_name,
             local_files_only=bool(config.hf_local_files_only),
         ).to(self.device)

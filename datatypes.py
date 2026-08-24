@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 
@@ -14,9 +15,10 @@ class DetectionResult:
     scores: np.ndarray  # float32, [N]
     prompt_ids: np.ndarray  # int32, [N]
     labels: list[str]
+    prompt_matches: list[list[int]] | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "image_size": [int(self.image_size[0]), int(self.image_size[1])],
             "prompts": list(self.prompts),
             "boxes_xyxy": np.asarray(self.boxes_xyxy, dtype=np.float32).tolist(),
@@ -24,15 +26,24 @@ class DetectionResult:
             "prompt_ids": np.asarray(self.prompt_ids, dtype=np.int32).tolist(),
             "labels": list(self.labels),
         }
+        if self.prompt_matches is not None:
+            data["prompt_matches"] = [list(map(int, matches)) for matches in self.prompt_matches]
+        return data
 
     @classmethod
-    def from_json_dict(cls, data: dict[str, Any]) -> "DetectionResult":
+    def from_json_dict(cls, data: dict[str, Any]) -> DetectionResult:
         h, w = data.get("image_size", [0, 0])
         prompts = [str(x) for x in (data.get("prompts") or [])]
         boxes = np.asarray(data.get("boxes_xyxy") or [], dtype=np.float32)
         scores = np.asarray(data.get("scores") or [], dtype=np.float32)
         prompt_ids = np.asarray(data.get("prompt_ids") or [], dtype=np.int32)
         labels = [str(x) for x in (data.get("labels") or [])]
+        prompt_matches_data = data.get("prompt_matches")
+        prompt_matches = (
+            [[int(prompt_id) for prompt_id in matches] for matches in prompt_matches_data]
+            if prompt_matches_data is not None
+            else None
+        )
         if boxes.size == 0:
             boxes = boxes.reshape((0, 4)).astype(np.float32)
         return cls(
@@ -42,6 +53,7 @@ class DetectionResult:
             scores=scores.reshape((-1,)).astype(np.float32),
             prompt_ids=prompt_ids.reshape((-1,)).astype(np.int32),
             labels=labels,
+            prompt_matches=prompt_matches,
         )
 
 
@@ -54,9 +66,10 @@ class SegmentationResult:
     prompt_ids: np.ndarray  # int32, [N]
     scores: np.ndarray  # float32, [N]
     masks: np.ndarray  # bool, [N,H,W]
+    prompt_matches: list[list[int]] | None = None
 
     def meta_json_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "backend": str(self.backend),
             "image_size": [int(self.image_size[0]), int(self.image_size[1])],
             "prompts": list(self.prompts),
@@ -65,6 +78,17 @@ class SegmentationResult:
             "scores": np.asarray(self.scores, dtype=np.float32).tolist(),
             "_masks_shape": list(np.asarray(self.masks).shape),
         }
+        if self.prompt_matches is not None:
+            data["prompt_matches"] = [list(map(int, matches)) for matches in self.prompt_matches]
+        return data
+
+
+@dataclass(frozen=True)
+class GroundedSegmentationResult:
+    """Detection and instance masks produced by one grounded segmentor."""
+
+    det: DetectionResult
+    seg: SegmentationResult
 
 
 @dataclass(frozen=True)
