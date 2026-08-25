@@ -68,6 +68,7 @@ from gda.modules.position_representation import (
     MaskPositionRepresentor,
     PositionRepresentationConfig,
 )
+from gda.modules.sam3_checkpoint import DEFAULT_SAM3_MODELSCOPE_REVISION
 from gda.pipeline import ImageDepthAndSegPipeline, PipelineConfig
 
 
@@ -177,11 +178,17 @@ class ImageToPositionsArgs(BaseModel, frozen=True):
     sam3_checkpoint: Path | None = None
     """Optional local SAM3 checkpoint."""
 
-    sam3_load_from_hf: bool = True
-    """Download gated SAM3 weights when no checkpoint is supplied."""
+    sam3_load_from_hf: bool = False
+    """Use Hugging Face instead of the default ModelScope checkpoint provider."""
 
     sam3_model_revision: str = DEFAULT_SAM3_MODEL_REVISION
-    """Exact SAM3 Hugging Face revision."""
+    """Exact SAM3 Hugging Face revision used by the optional provider."""
+
+    sam3_modelscope_revision: str = DEFAULT_SAM3_MODELSCOPE_REVISION
+    """Exact SAM3 ModelScope revision used by the default provider."""
+
+    sam3_local_files_only: bool = False
+    """Require the selected SAM3 checkpoint to already be cached."""
 
     sam3_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """SAM3 instance confidence threshold."""
@@ -350,9 +357,6 @@ def main(cli_args: list[str] | None = None) -> None:
     prompts_list = _parse_prompts(args.prompts)
     if not prompts_list:
         raise ValueError("--prompts must contain at least one item")
-    if local_files_only and args.seg_backend == "sam3" and args.sam3_checkpoint is None:
-        raise ValueError("Offline SAM3 inference requires --sam3-checkpoint")
-
     out_dir = _resolve_output_dir(args.image, args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -412,6 +416,9 @@ def main(cli_args: list[str] | None = None) -> None:
                     checkpoint=args.sam3_checkpoint,
                     load_from_hf=args.sam3_load_from_hf,
                     model_revision=args.sam3_model_revision,
+                    modelscope_revision=args.sam3_modelscope_revision,
+                    local_files_only=args.sam3_local_files_only
+                    or (args.sam3_load_from_hf and local_files_only),
                     confidence_threshold=args.sam3_confidence_threshold,
                     resolution=args.sam3_resolution,
                     compile=args.sam3_compile,

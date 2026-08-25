@@ -63,6 +63,7 @@ already-open SSH session, exporting `PATH` as above takes effect immediately.
 export GDA_PIXI_PLATFORM=h200
 python3 scripts/check-setup-platform.py "$GDA_PIXI_PLATFORM"
 pixi install --platform h200 --locked
+pixi run --platform h200 --locked ensure-sam3
 python3 scripts/ensure-sam2-checkpoint.py
 pixi run --platform h200 --locked build-sam2
 ```
@@ -74,6 +75,7 @@ export GDA_PIXI_PLATFORM=b300
 python3 scripts/check-setup-platform.py "$GDA_PIXI_PLATFORM"
 CONDA_OVERRIDE_CUDA=13.0 CONDA_OVERRIDE_CUDA_ARCH=10.3 \
   pixi install --platform b300 --locked
+pixi run --platform b300 --locked ensure-sam3
 python3 scripts/ensure-sam2-checkpoint.py
 pixi run --platform b300 --locked build-sam2
 ```
@@ -89,22 +91,40 @@ to overwrite an unexpected file.
 `.pixi/gda-build/`, applies GDA's CUDA-architecture patch there, and builds from
 that isolated copy. The recorded submodule checkout remains clean.
 
-Native SAM3 uses the gated `facebook/sam3` image checkpoint (`sam3.pt`). Request
-access first, then authenticate when the checkpoint is not already cached:
+Native SAM3 uses `facebook/sam3/sam3.pt`. The default provider is the public
+ModelScope repository at the exact revision
+`96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`; it does not require a ModelScope
+login. `pixi run ensure-sam3` downloads only `sam3.pt`, not the complete
+repository containing both weight formats, and verifies its identity:
+
+- size: `3450062241` bytes
+- SHA256: `9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e`
+
+With `GDA_CACHE_DIR` set, the content-addressed path is
+`$GDA_CACHE_DIR/checkpoints/sam3/9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e/sam3.pt`.
+Without it, GDA uses the corresponding path below `~/.cache/gda` (or
+`XDG_CACHE_HOME`). Default inference also ensures the same pinned file lazily.
+
+Hugging Face remains an explicit alternative. Request access, authenticate, and
+pass `--sam3-load-from-hf` when selecting it:
 
 ```bash
 pixi run --platform "$GDA_PIXI_PLATFORM" --locked hf auth login
 ```
 
-SAM3 is distributed under Meta's SAM License rather than Apache/MIT; review its
-use, redistribution, and trade-control restrictions before deployment. Select
-the H200 or B300 Pixi target to match the host GPU; each target pins its CUDA
-toolkit and PyTorch wheel.
+Both providers deliver the same verified checkpoint; changing the download
+provider does not change its Meta SAM License. Review its use, redistribution,
+and trade-control restrictions before deployment. Select the H200 or B300 Pixi
+target to match the host GPU; each target pins its CUDA toolkit and PyTorch
+wheel.
 
-Model weights are not committed to Git. Default Hugging Face downloads use exact
-model revisions rather than moving branch names:
+Model weights are not committed to Git. Downloads use exact model revisions
+rather than moving branch names:
 
-- SAM3: `facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7`
+- SAM3, default ModelScope provider:
+  `facebook/sam3@96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`
+- SAM3, optional Hugging Face provider:
+  `facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7`
 - Depth-Anything-3: `depth-anything/DA3-LARGE@c54c26b16ec04d218e8d584ecf4bce082a9fcc20`
 - GroundingDINO: `IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb`
 
@@ -149,9 +169,14 @@ pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
   --output-dir outputs/seg_sam3
 ```
 
-To use a local SAM3 image checkpoint, add
-`--sam3-checkpoint /path/to/sam3.pt`. A local checkpoint bypasses the Hugging Face
-download.
+To require the pinned ModelScope file to be present without network access, add
+`--sam3-local-files-only`. To use an explicit local SAM3 image checkpoint, add
+`--sam3-checkpoint /path/to/sam3.pt`; a local path bypasses both providers and
+the official-artifact hash check so intentionally customized checkpoints remain usable.
+
+To select the optional Hugging Face provider instead, add
+`--sam3-load-from-hf`. Its default revision remains pinned independently from
+the ModelScope revision.
 
 Run the GroundingDINO -> SAM2.1 fallback:
 

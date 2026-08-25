@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from gda.modules import depth_estimation, grounded_segmentation, object_detection
 
 
@@ -71,24 +69,8 @@ def test_grounding_dino_passes_pinned_revision(monkeypatch):
     ]
 
 
-def test_sam3_download_uses_exact_revision(monkeypatch, tmp_path):
-    checkpoint = tmp_path / "sam3.pt"
-    calls: list[dict] = []
-
-    def fake_download(**kwargs):
-        calls.append(kwargs)
-        return str(checkpoint)
-
-    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
-    result = grounded_segmentation._download_sam3_checkpoint(
+def test_sam3_huggingface_revision_alias_remains_pinned():
+    assert (
         grounded_segmentation.DEFAULT_SAM3_MODEL_REVISION
+        == grounded_segmentation.DEFAULT_SAM3_HUGGINGFACE_REVISION
     )
-
-    assert result == Path(checkpoint)
-    assert calls == [
-        {
-            "repo_id": "facebook/sam3",
-            "filename": "sam3.pt",
-            "revision": grounded_segmentation.DEFAULT_SAM3_MODEL_REVISION,
-        }
-    ]

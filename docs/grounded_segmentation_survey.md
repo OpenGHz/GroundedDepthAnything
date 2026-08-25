@@ -1,4 +1,4 @@
-# Grounded segmentation 技术调研（2026-08-22）
+# Grounded segmentation 技术调研（2026-08-25 更新）
 
 ## 结论
 
@@ -34,14 +34,17 @@ SAM 3 image API 会缓存一次 image backbone output。本项目按 prompt 顺�
 
 ## 权重与许可
 
-- `facebook/sam3` 和 `facebook/sam3.1` 都是 Hugging Face gated 权重，需要提交联系
-  信息、接受许可并获得授权。
-- SAM 3 使用 Meta SAM License，不是 Apache/MIT；再分发、贸易管制及军事/武器用途
-  有额外条款，部署前必须审阅。
-- 当前 `OpenGHz` Hugging Face 账号访问 `facebook/sam3` 返回 403，故 native SAM 3
-  的真实推理需要先获得官方授权；项目不会静默替换成其他 checkpoint。
+- 单图 SAM3 默认从公开的 ModelScope `facebook/sam3` 获取 `sam3.pt`，固定 revision
+  `96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`；Hugging Face gated 仓库作为显式
+  可选来源，固定 revision `3c879f39826c281e95690f02c7821c4de09afae7`。
+- 两个来源的 `sam3.pt` 均应为 `3450062241` bytes，SHA256
+  `9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e`。项目只下载
+  此单文件，不默认拉取还包含另一套权重的完整仓库，也不会在 provider 失败时静默
+  切换来源或 checkpoint。
+- ModelScope 只改变分发来源，不改变 SAM 3 的 Meta SAM License。该许可证不是
+  Apache/MIT；再分发、贸易管制及军事/武器用途有额外条款，部署前必须审阅。
 
-## B300 工程验证
+## SAM2 fallback 的 B300 工程验证
 
 验证节点：8x NVIDIA B300 SXM6 AC，driver 580.82.07，单卡约 275 GiB。
 
@@ -61,6 +64,8 @@ SAM 3 image API 会缓存一次 image backbone output。本项目按 prompt 顺�
 - [SAM 3 官方仓库](https://github.com/facebookresearch/sam3)
 - [SAM 3 论文](https://arxiv.org/abs/2511.16719)
 - [SAM 3 模型卡](https://huggingface.co/facebook/sam3)
+- [SAM 3 ModelScope 仓库](https://modelscope.cn/models/facebook/sam3)
+- [ModelScope 模型下载文档](https://modelscope.cn/docs/models/download)
 - [SAM 3.1 Object Multiplex 发布说明](https://github.com/facebookresearch/sam3/blob/main/RELEASE_SAM3p1.md)
 - [SAM 3.1 模型卡](https://huggingface.co/facebook/sam3.1)
 - [Grounded-SAM-2 官方仓库](https://github.com/IDEA-Research/Grounded-SAM-2)

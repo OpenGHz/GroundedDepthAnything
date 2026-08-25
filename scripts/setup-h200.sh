@@ -25,7 +25,7 @@ fi
 #ai <<<
 
 export GDA_PIXI_PLATFORM=h200
-export GDA_SETUP_INPUTS_SHA256=9172e853f51e884cc0b77be188e161385b4ea4f4d00847cdbd8cd0504fae0973
+export GDA_SETUP_INPUTS_SHA256=aceaca88cbbfa2504621fb3fa0acfdb5a9f355c6fcf6b038d17339d318f0cb7d
 
 #ai: always
 #ai: name validate-setup-inputs
@@ -66,6 +66,11 @@ python3 scripts/ensure-sam2-checkpoint.py
 
 #ai: name install-locked-h200-environment
 pixi install --platform h200 --locked
+
+# Cache location is an external runtime input, so verify/download every time.
+#ai: always
+#ai: name ensure-sam3-checkpoint
+pixi run --platform h200 --locked ensure-sam3
 
 #ai: name build-h200-sam2-cuda-extension
 pixi run --platform h200 --locked build-sam2

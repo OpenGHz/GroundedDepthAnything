@@ -25,12 +25,14 @@ pixi --version
 # 已打开的 SSH shell 也可以执行：source ~/.bashrc
 python3 scripts/check-setup-platform.py "$GDA_PIXI_PLATFORM"
 pixi install --platform "$GDA_PIXI_PLATFORM" --locked
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked ensure-sam3
 python3 scripts/ensure-sam2-checkpoint.py
 pixi run --platform "$GDA_PIXI_PLATFORM" --locked build-sam2
 ```
 
-`scripts/setup-gpu.sh` 会下载并校验公开的 SAM2.1 Hiera-L checkpoint；手动安装时
-可先运行 `python3 scripts/ensure-sam2-checkpoint.py`。
+`scripts/setup-gpu.sh` 会下载并校验 SAM3 与公开的 SAM2.1 Hiera-L checkpoint；手动
+安装时可分别运行 `pixi run --platform "$GDA_PIXI_PLATFORM" --locked ensure-sam3`
+和 `python3 scripts/ensure-sam2-checkpoint.py`。
 
 SAM2 checkpoint 不进入 Git。设置 `GDA_CACHE_DIR` 后，其默认位置是
 `$GDA_CACHE_DIR/checkpoints/sam2.1_hiera_large.pt`；未设置时通常是
@@ -82,16 +84,24 @@ pixi run --platform "$GDA_PIXI_PLATFORM" --locked gda-detect \
 默认后端是 `sam3`。它直接接受文本提示并输出实例 mask，不需要先运行
 GroundingDINO，也不会把检测框转换成点提示。多个文本提示共享同一次图像编码。
 
-SAM3 图像权重来自 gated 仓库 `facebook/sam3`，默认 checkpoint 是 `sam3.pt`。
-当前入口处理单张图像，因此不使用面向视频 Object Multiplex 的 SAM3.1 checkpoint。
-SAM3 使用 Meta SAM License，部署前请核对其用途和再分发限制。
-默认下载固定到模型 revision
-`3c879f39826c281e95690f02c7821c4de09afae7`，权重不会写入 Git。
-首次下载前需要先申请访问权限并登录：
+SAM3 图像 checkpoint 是 `facebook/sam3/sam3.pt`。默认从公开的 ModelScope 仓库下载，
+固定 revision 为 `96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`，无需登录。项目只下载
+`sam3.pt`，不会下载还包含 `model.safetensors` 的完整双权重仓库。下载后验证：
+
+- 大小：`3450062241` bytes
+- SHA256：`9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e`
+
+设置 `GDA_CACHE_DIR` 时，默认路径为
+`$GDA_CACHE_DIR/checkpoints/sam3/9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e/sam3.pt`；
+未设置时通常位于 `~/.cache/gda` 下的相同相对路径。可显式预下载并校验：
 
 ```bash
-pixi run --platform "$GDA_PIXI_PLATFORM" --locked hf auth login
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked ensure-sam3
 ```
+
+当前入口处理单张图像，因此不使用面向视频 Object Multiplex 的 SAM3.1 checkpoint。
+ModelScope 只是默认分发来源，不改变权重的 Meta SAM License；部署前仍需核对其用途、
+再分发和贸易管制限制。
 
 运行：
 
@@ -102,7 +112,17 @@ pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
   --output-dir outputs/seg_sam3
 ```
 
-若已有本地 checkpoint，可绕过 Hugging Face 下载：
+离线使用已缓存的默认 ModelScope checkpoint：
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
+  --image third_party/sam3/assets/images/truck.jpg \
+  --prompts "truck" \
+  --sam3-local-files-only \
+  --output-dir outputs/seg_sam3
+```
+
+若已有本地 checkpoint，可绕过两个下载 provider：
 
 ```bash
 pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
@@ -110,6 +130,19 @@ pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
   --prompts "truck" \
   --sam3-checkpoint /path/to/sam3.pt \
   --output-dir outputs/seg_sam3
+```
+
+Hugging Face 是显式可选 provider。其独立固定 revision 为
+`3c879f39826c281e95690f02c7821c4de09afae7`；先获得 gated 权限并登录，再加入
+`--sam3-load-from-hf`：
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked hf auth login
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
+  --image third_party/sam3/assets/images/truck.jpg \
+  --prompts "truck" \
+  --sam3-load-from-hf \
+  --output-dir outputs/seg_sam3_hf
 ```
 
 输出：

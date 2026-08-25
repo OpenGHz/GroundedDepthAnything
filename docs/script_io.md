@@ -33,9 +33,14 @@ git submodule update --init --recursive
 
 权重不进入 Git。默认来源与定位规则如下：
 
-- SAM3：从 gated `facebook/sam3` 下载 `sam3.pt`，需要先获得访问权限并执行
-  `pixi run --platform "$GDA_PIXI_PLATFORM" --locked hf auth login`；也可以在 CLI
-  中显式提供 `--sam3-checkpoint`。
+- SAM3：默认从公开的 ModelScope `facebook/sam3` 单独下载 `sam3.pt`，固定 revision
+  `96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`。设置 `GDA_CACHE_DIR` 时写入
+  `$GDA_CACHE_DIR/checkpoints/sam3/9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e/sam3.pt`；
+  未设置时写入 GDA/XDG 默认 cache。文件固定为 `3450062241` bytes，SHA256 为
+  `9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e`。
+  `--sam3-load-from-hf` 显式选择 gated Hugging Face provider；
+  `--sam3-local-files-only` 禁止所选 provider 访问网络；`--sam3-checkpoint` 则完全
+  绕过 provider。
 - SAM2.1 Hiera-L：由 `scripts/ensure-sam2-checkpoint.py` 从固定公开 URL 下载并校验
   SHA256。设置 `GDA_CACHE_DIR` 时写入
   `$GDA_CACHE_DIR/checkpoints/sam2.1_hiera_large.pt`；未设置时通常写入
@@ -46,13 +51,17 @@ git submodule update --init --recursive
 源码使用 Apache-2.0 就推断权重可商用；部署前应核对
 `THIRD_PARTY_NOTICES.md` 和对应模型卡。
 
-默认 Hugging Face 模型 revision 是固定 commit：
+默认模型 revision 都固定为 commit，而不是移动分支：
 
-- SAM3：`3c879f39826c281e95690f02c7821c4de09afae7`
+- SAM3 ModelScope（默认）：`96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`
+- SAM3 Hugging Face（可选）：`3c879f39826c281e95690f02c7821c4de09afae7`
 - Depth-Anything-3：`c54c26b16ec04d218e8d584ecf4bce082a9fcc20`
 - GroundingDINO：`12bdfa3120f3e7ec7b434d90674b3396eccf88eb`
 
-源码 gitlink 与模型 revision 是两组独立 pin，缺少任意一组都不能完整复现。
+SAM3 两个 provider 的 revision 空间彼此独立，但下载的 `sam3.pt` 还必须通过同一
+size/SHA256 校验。项目已有固定 SAM3 源码 submodule，因此默认不下载包含两套权重和
+仓库文件的完整 ModelScope snapshot。源码 gitlink 与模型 revision 是两组独立 pin，
+缺少任意一组都不能完整复现。
 
 ## 2. 环境与维护脚本
 
@@ -70,6 +79,7 @@ git submodule update --init --recursive
 动作与输出：
 
 - 校验 submodule gitlinks
+- 从 ModelScope 下载并校验默认 SAM3 checkpoint
 - 下载并校验 SAM2 checkpoint
 - 创建锁定的 `.pixi/` 环境
 - 在 `.pixi/gda-build/` 隔离副本内 patch、编译并安装 SAM2 CUDA 扩展
@@ -90,7 +100,18 @@ git submodule update --init --recursive
 - 仅在文件不存在且下载内容 SHA256 正确时完成安装
 - 若目标已有错误 hash，脚本会报错而不会覆盖
 
-### 2.3 `scripts/build-sam2.py`
+### 2.3 `scripts/ensure-sam3-checkpoint.py`
+
+输入：锁定 Pixi 环境，以及可选 `GDA_CACHE_DIR`。对应 Pixi task 是：
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked ensure-sam3
+```
+
+输出：GDA content-addressed cache 中的 `sam3.pt`。脚本只请求 ModelScope 单文件，
+使用固定 revision，并在完成前校验文件大小和 SHA256；不会下载完整双权重仓库。
+
+### 2.4 `scripts/build-sam2.py`
 
 输入：
 
@@ -103,7 +124,7 @@ git submodule update --init --recursive
 编译发生在 `.pixi/gda-build/` 下，不修改 submodule；因此构建后
 `git submodule status --recursive` 仍可用于验证源码状态。
 
-### 2.4 `scripts/doctor.py`
+### 2.5 `scripts/doctor.py`
 
 输入：已安装的锁定环境、可用 NVIDIA GPU、已编译的 SAM2 extension。
 
@@ -166,9 +187,14 @@ prompt，不依赖 phrase substring 猜测。
 ### 5.1 默认 SAM3
 
 `--backend sam3` 直接从文本预测 instances/masks，一张图的多个 prompt 共享一次图像
-编码。可选 `--sam3-checkpoint` 使用本地权重；否则按固定 revision 从 gated
-`facebook/sam3` 获取。跨 prompt 的重复实例按 mask IoU 去重，并在
-`prompt_matches` 中保留全部匹配关系。
+编码。可选 `--sam3-checkpoint` 使用本地权重；否则默认按固定 revision 从
+ModelScope 单文件获取。`--sam3-load-from-hf` 选择固定 HF revision，
+`--sam3-local-files-only` 要求所选 provider 只读缓存。跨 prompt 的重复实例按 mask
+IoU 去重，并在 `prompt_matches` 中保留全部匹配关系。
+
+高级覆盖项 `--sam3-modelscope-revision` 只作用于默认 ModelScope provider；
+`--sam3-model-revision` 只作用于显式 Hugging Face provider。两个 revision 不能互换，
+无论覆盖哪个来源，最终文件仍须通过固定 size/SHA256 校验。
 
 ### 5.2 GroundingDINO → SAM2.1 fallback
 

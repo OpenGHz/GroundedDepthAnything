@@ -63,6 +63,7 @@ GDA_EXPECTED_CUDA_ARCH = "10.3"
 
 [tasks]
 workspace-check = { cmd = "python scripts/check-workspace.py", description = "Check pinned recursive submodules" }
+ensure-sam3 = { cmd = "python scripts/ensure-sam3-checkpoint.py", description = "Download and verify the pinned SAM3 checkpoint from ModelScope" }
 segment = { cmd = "gda-segment", description = "Run grounded image segmentation; append CLI arguments" }
 pipeline = { cmd = "gda", description = "Run depth plus grounded segmentation; append CLI arguments" }
 positions = { cmd = "gda-positions", description = "Run the image-to-3D-position pipeline; append CLI arguments" }

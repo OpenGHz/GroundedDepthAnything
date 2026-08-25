@@ -16,9 +16,10 @@ GroundingDINO → SAM2.1 作为显式 fallback 保留。
 submodule，所以 checkout 必须执行 `git submodule update --init --recursive`。
 `scripts/check-workspace.py` 会按 index 校验每层 gitlink、HEAD 与脏状态。
 
-模型权重不进入 Git。SAM3、Depth-Anything-3、GroundingDINO 的 Hugging Face 加载
-使用精确 revision；SAM2 checkpoint 使用固定 URL 与 SHA256。源码 pin 和权重 pin
-共同构成可复现输入，不能用一个替代另一个。
+模型权重不进入 Git。SAM3 默认从 ModelScope 固定 revision 单独下载 `sam3.pt`，并
+校验固定 size/SHA256；Hugging Face 是显式可选 provider。Depth-Anything-3 和
+GroundingDINO 使用精确 Hugging Face revision，SAM2 checkpoint 使用固定 URL 与
+SHA256。源码 pin 和权重 pin 共同构成可复现输入，不能用一个替代另一个。
 
 SAM2 的 GPU 扩展需要针对 H200 `sm_90` 或 B300 `sm_103` 构建。GDA 将
 Grounded-SAM-2 复制到 `.pixi/gda-build/`，只在该隔离副本中应用 CUDA patch 和
@@ -115,9 +116,14 @@ segment(image_rgb, det: DetectionResult) -> SegmentationResult
 SAM3 会按 prompt 收集 instances，再依据 mask IoU 做跨 prompt 去重。保留实例的
 `prompt_ids` 给出主归属，`prompt_matches` 保留所有匹配 prompt，防止去重丢语义。
 
-SAM3 checkpoint `facebook/sam3/sam3.pt` 是 gated artifact。默认加载需要先获得
-Hugging Face 权限；离线运行必须显式提供 `--sam3-checkpoint`。当前单图入口使用
-SAM3 image model，不用面向视频 Object Multiplex 的 SAM3.1 链路。
+SAM3 checkpoint 是 `facebook/sam3/sam3.pt`。默认 ModelScope provider 固定 revision
+`96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`，只下载该文件，不拉取包含
+`model.safetensors` 的完整仓库。下载结果固定为 `3450062241` bytes，SHA256 为
+`9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e`，并缓存到
+`$GDA_CACHE_DIR/checkpoints/sam3/<sha256>/sam3.pt`。Hugging Face provider 需显式
+`--sam3-load-from-hf`；离线可使用 `--sam3-local-files-only` 或本地
+`--sam3-checkpoint`。当前单图入口使用 SAM3 image model，不用面向视频 Object
+Multiplex 的 SAM3.1 链路。
 
 ### 3.5 `pipeline.py`
 
@@ -157,8 +163,10 @@ process(image_rgb: np.ndarray, prompts: list[str]) -> DepthAndSegResult
   可视化边界。
 - prompt 支持逗号、分号和换行；shell 中应整体加引号。
 - 输出目录未指定时默认为输入图目录。
-- Hugging Face 离线模式必须使用已缓存的固定 revision；SAM3 离线模式还要求本地
-  checkpoint 路径。
+- Hugging Face 离线模式必须使用已缓存的固定 revision；SAM3 使用
+  `--sam3-local-files-only` 只读所选 provider 的缓存，也可显式提供本地 checkpoint。
+- `--sam3-load-from-hf` 只切换 checkpoint provider，不改变模型身份或 Meta SAM
+  License；provider 失败时不会静默切换到另一来源。
 - 懒导入隔离可选重依赖：SAM3-only 不需要先构建 SAM2，单独检测也不加载 DA3。
 
 ## 5. 模型与源码版本
@@ -171,9 +179,15 @@ process(image_rgb: np.ndarray, prompts: list[str]) -> DepthAndSegResult
 
 默认模型 revisions：
 
-- `facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7`
+- ModelScope SAM3（默认）：
+  `facebook/sam3@96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`
+- Hugging Face SAM3（可选）：
+  `facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7`
 - `depth-anything/DA3-LARGE@c54c26b16ec04d218e8d584ecf4bce082a9fcc20`
 - `IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb`
+
+两个 SAM3 provider 的 revision 不互换，但其 `sam3.pt` 必须匹配上述同一 size 和
+SHA256。ModelScope 作为默认分发来源不改变 Meta SAM License。
 
 升级任一源码或模型 pin 时，应在 H200/B300 至少重新验证 workspace check、lint、
 单元测试、SAM2 CUDA doctor 和一张真实图片推理，并在同一次变更中更新相关文档。

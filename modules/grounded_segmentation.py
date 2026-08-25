@@ -10,13 +10,13 @@ import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Literal, Protocol, Self
+from typing import Any, Literal, Protocol
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import CliApp
 
 from gda.datatypes import (
@@ -39,13 +39,18 @@ from gda.modules.object_segmentation import (
     Sam2BoxSegmentor,
     _overlay_masks,
 )
+from gda.modules.sam3_checkpoint import (
+    DEFAULT_SAM3_HUGGINGFACE_REVISION,
+    DEFAULT_SAM3_MODELSCOPE_REVISION,
+    download_sam3_checkpoint,
+)
 from gda.modules.workspace import third_party_root
 
 _THIRD_PARTY_ROOT = third_party_root()
 
 GroundedBackend = Literal["sam2", "sam3"]
 AutocastDtype = Literal["none", "bfloat16", "float16"]
-DEFAULT_SAM3_MODEL_REVISION = "3c879f39826c281e95690f02c7821c4de09afae7"
+DEFAULT_SAM3_MODEL_REVISION = DEFAULT_SAM3_HUGGINGFACE_REVISION
 
 
 def _import_sam3_components():
@@ -71,20 +76,6 @@ def _import_sam3_components():
             ) from exc
 
     return build_sam3_image_model, Sam3Processor
-
-
-def _download_sam3_checkpoint(revision: str) -> Path:
-    """Download the gated SAM3 image checkpoint from an exact model revision."""
-
-    from huggingface_hub import hf_hub_download
-
-    return Path(
-        hf_hub_download(
-            repo_id="facebook/sam3",
-            filename="sam3.pt",
-            revision=revision,
-        )
-    )
 
 
 def _as_rgb_array(image_rgb: np.ndarray | Image.Image) -> np.ndarray:
@@ -117,11 +108,17 @@ class Sam3ConceptSegmentationConfig(BaseModel, frozen=True):
     checkpoint: Path | None = None
     """Optional local SAM3 image checkpoint."""
 
-    load_from_hf: bool = True
-    """Download the gated checkpoint from Hugging Face when no local path is given."""
+    load_from_hf: bool = False
+    """Use Hugging Face instead of the default ModelScope checkpoint provider."""
 
     model_revision: str = DEFAULT_SAM3_MODEL_REVISION
-    """Exact Hugging Face model revision used when downloading the gated checkpoint."""
+    """Exact Hugging Face revision used when that optional provider is selected."""
+
+    modelscope_revision: str = DEFAULT_SAM3_MODELSCOPE_REVISION
+    """Exact ModelScope revision used by the default checkpoint provider."""
+
+    local_files_only: bool = False
+    """Require the selected provider's pinned checkpoint to already be cached."""
 
     confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """Minimum concept-presence-adjusted score retained as an instance."""
@@ -137,12 +134,6 @@ class Sam3ConceptSegmentationConfig(BaseModel, frozen=True):
 
     deduplicate_mask_iou: float | None = Field(default=0.9, gt=0.0, le=1.0)
     """Cross-prompt mask IoU threshold; set to null to preserve duplicate matches."""
-
-    @model_validator(mode="after")
-    def validate_checkpoint_source(self) -> Self:
-        if self.checkpoint is None and not self.load_from_hf:
-            raise ValueError("Provide a SAM3 checkpoint or enable Hugging Face loading.")
-        return self
 
 
 class GroundingDinoSam2Config(BaseModel, frozen=True):
@@ -205,11 +196,12 @@ class Sam3ConceptSegmentor:
 
         checkpoint = config.checkpoint
         if checkpoint is None:
-            if os.environ.get("HF_HUB_OFFLINE") == "1":
-                raise FileNotFoundError(
-                    "SAM3 offline mode requires --sam3-checkpoint pointing to a local sam3.pt."
-                )
-            checkpoint = _download_sam3_checkpoint(config.model_revision)
+            checkpoint = download_sam3_checkpoint(
+                load_from_hf=config.load_from_hf,
+                modelscope_revision=config.modelscope_revision,
+                huggingface_revision=config.model_revision,
+                local_files_only=config.local_files_only,
+            )
         elif not checkpoint.exists():
             raise FileNotFoundError(f"SAM3 checkpoint not found: {checkpoint}")
 
@@ -452,11 +444,17 @@ class GroundedSegmentationArgs(BaseModel, frozen=True):
     sam3_checkpoint: Path | None = None
     """Optional local SAM3 checkpoint."""
 
-    sam3_load_from_hf: bool = True
-    """Download gated SAM3 weights when no checkpoint is supplied."""
+    sam3_load_from_hf: bool = False
+    """Use Hugging Face instead of the default ModelScope checkpoint provider."""
 
     sam3_model_revision: str = DEFAULT_SAM3_MODEL_REVISION
-    """Exact SAM3 Hugging Face revision used when downloading the gated checkpoint."""
+    """Exact SAM3 Hugging Face revision used by the optional provider."""
+
+    sam3_modelscope_revision: str = DEFAULT_SAM3_MODELSCOPE_REVISION
+    """Exact SAM3 ModelScope revision used by the default provider."""
+
+    sam3_local_files_only: bool = False
+    """Require the selected SAM3 checkpoint to already be cached."""
 
     sam3_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """SAM3 instance confidence threshold."""
@@ -488,9 +486,6 @@ def main(cli_args: list[str] | None = None) -> None:
     prompts = _parse_prompts(args.prompts)
     if not prompts:
         raise ValueError("--prompts must contain at least one concept")
-    if args.hf_offline and args.backend == "sam3" and args.sam3_checkpoint is None:
-        raise ValueError("--hf-offline with SAM3 requires --sam3-checkpoint")
-
     config = GroundedSegmentationConfig(
         backend=args.backend,
         grounded_sam2=GroundingDinoSam2Config(
@@ -514,6 +509,9 @@ def main(cli_args: list[str] | None = None) -> None:
             checkpoint=args.sam3_checkpoint,
             load_from_hf=args.sam3_load_from_hf,
             model_revision=args.sam3_model_revision,
+            modelscope_revision=args.sam3_modelscope_revision,
+            local_files_only=args.sam3_local_files_only
+            or (args.sam3_load_from_hf and args.hf_offline),
             confidence_threshold=args.sam3_confidence_threshold,
             resolution=args.sam3_resolution,
             compile=args.sam3_compile,

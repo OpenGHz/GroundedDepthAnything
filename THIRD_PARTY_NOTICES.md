@@ -21,8 +21,16 @@ and includes use, redistribution, publication, and trade-control conditions.
 Model weights are not committed to GDA and may use terms different from their
 source code:
 
-- Access to the default `facebook/sam3` checkpoint is gated by Hugging Face and
-  governed by the SAM License.
+- The default `facebook/sam3/sam3.pt` is downloaded as a single file from the
+  public ModelScope repository at revision
+  `96f3e1b404ba14f2cfac60ee6ae87c269a7b7923`. The optional Hugging Face source
+  remains gated and is pinned independently at revision
+  `3c879f39826c281e95690f02c7821c4de09afae7`. Both sources must produce the
+  same `3450062241`-byte artifact with SHA256
+  `9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e`.
+  ModelScope changes only the distribution source and does not change or
+  replace the SAM License. GDA does not download the complete repository with
+  both weight formats by default.
 - The default `depth-anything/DA3-LARGE` model is listed by its upstream model
   table as **CC BY-NC 4.0**. It is not licensed for commercial use under the
   source repository's Apache-2.0 license.

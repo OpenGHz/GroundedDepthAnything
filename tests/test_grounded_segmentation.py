@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from pydantic import ValidationError
 
 from gda.datatypes import DetectionResult
 from gda.modules import grounded_segmentation as grounded
@@ -104,6 +103,18 @@ def test_sam3_concept_reuses_image_embedding_and_maps_prompts(monkeypatch, tmp_p
     ]
 
 
+def test_local_sam3_checkpoint_bypasses_registry_download(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "sam3.pt"
+    checkpoint.touch()
+    monkeypatch.setattr(
+        grounded,
+        "download_sam3_checkpoint",
+        lambda **kwargs: pytest.fail(f"unexpected registry download: {kwargs}"),
+    )
+
+    _build_fake_segmentor(monkeypatch, checkpoint)
+
+
 def test_sam3_output_normalizes_empty_and_channel_shapes():
     boxes, scores, masks = grounded.Sam3ConceptSegmentor._normalize_output(
         {
@@ -179,35 +190,50 @@ def test_detection_json_round_trip_preserves_prompt_matches():
     np.testing.assert_array_equal(restored.boxes_xyxy, result.boxes_xyxy)
 
 
-def test_sam3_config_requires_a_checkpoint_source():
-    with pytest.raises(ValidationError):
-        grounded.Sam3ConceptSegmentationConfig(
-            device="cpu",
-            checkpoint=None,
-            load_from_hf=False,
-        )
+def test_sam3_config_defaults_to_modelscope():
+    config = grounded.Sam3ConceptSegmentationConfig(device="cpu")
+    assert config.checkpoint is None
+    assert config.load_from_hf is False
+    assert config.modelscope_revision == grounded.DEFAULT_SAM3_MODELSCOPE_REVISION
 
 
-def test_sam3_offline_mode_requires_explicit_checkpoint(monkeypatch):
+def test_sam3_download_configuration_is_forwarded(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "sam3.pt"
+    checkpoint.touch()
+    calls: list[dict] = []
+
+    def fake_download(**kwargs):
+        calls.append(kwargs)
+        return checkpoint
+
     monkeypatch.setattr(
         grounded,
         "_import_sam3_components",
-        lambda: (object(), object()),
+        lambda: (lambda **kwargs: object(), FakeSam3Processor),
     )
     monkeypatch.setattr(
         grounded,
-        "_download_sam3_checkpoint",
-        lambda revision: pytest.fail("must not download"),
+        "download_sam3_checkpoint",
+        fake_download,
     )
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     config = grounded.Sam3ConceptSegmentationConfig(
         device="cpu",
-        checkpoint=None,
         load_from_hf=True,
+        model_revision="hf-revision",
+        modelscope_revision="modelscope-revision",
+        local_files_only=True,
         autocast_dtype="none",
     )
-    with pytest.raises(FileNotFoundError, match="offline mode requires"):
-        grounded.Sam3ConceptSegmentor(config)
+    grounded.Sam3ConceptSegmentor(config)
+
+    assert calls == [
+        {
+            "load_from_hf": True,
+            "modelscope_revision": "modelscope-revision",
+            "huggingface_revision": "hf-revision",
+            "local_files_only": True,
+        }
+    ]
 
 
 def test_grounding_dino_assigns_prompt_ids_without_phrase_guessing():
