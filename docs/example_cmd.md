@@ -77,6 +77,16 @@ pixi run --platform "$GDA_PIXI_PLATFORM" --locked gda-detect \
 - `outputs/det/detections.json`
 - `outputs/det/detections_vis.png`
 
+也可以显式选择 Falcon-Perception-300M（仅检测，模型从 Hugging Face 下载）：
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked gda-detect \
+  --image third_party/sam3/assets/images/truck.jpg \
+  --prompts "truck" \
+  --backend falcon \
+  --output-dir outputs/det_falcon
+```
+
 ## 3) 文本 Grounding 分割
 
 ### 3.1 默认：原生 SAM3 text-to-mask
@@ -179,7 +189,33 @@ pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
 默认使用 `$GDA_CACHE_DIR/checkpoints/sam2.1_hiera_large.pt`；未设置
 `GDA_CACHE_DIR` 时使用 `~/.cache/gda/checkpoints/sam2.1_hiera_large.pt`。
 
-### 3.3 单独调试 SAM2.1 box-to-mask
+### 3.3 Falcon Perception text-to-mask
+
+Falcon 是可选的 Hugging Face 后端，完整模型直接由自然语言查询生成实例框和
+COCO-RLE mask，不经过 GroundingDINO 或 SAM2：
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
+  --image third_party/sam3/assets/images/truck.jpg \
+  --prompts "truck" \
+  --backend falcon \
+  --output-dir outputs/seg_falcon
+```
+
+Falcon 公开输出没有实例置信度，GDA 的 `scores` 使用配置中的常数占位值（默认
+1.0），不应将其解释为校准概率。也可以在旧链路中用 Falcon-Perception-300M
+替换 GroundingDINO 前端：
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
+  --image third_party/sam3/assets/images/truck.jpg \
+  --prompts "truck" \
+  --backend sam2 \
+  --det-backend falcon \
+  --output-dir outputs/seg_falcon_sam2
+```
+
+### 3.4 单独调试 SAM2.1 box-to-mask
 
 先按第 2 节生成 `detections.json`，再单独运行 SAM2.1 box 分割入口：
 

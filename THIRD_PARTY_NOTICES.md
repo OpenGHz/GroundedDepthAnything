@@ -11,6 +11,7 @@ grant permission to use, modify, or distribute GDA itself.
 | `third_party/depth-anything-3` | [ByteDance-Seed/Depth-Anything-3](https://github.com/ByteDance-Seed/Depth-Anything-3) | [Apache License 2.0](https://github.com/ByteDance-Seed/Depth-Anything-3/blob/2c21ea849ceec7b469a3e62ea0c0e270afc3281a/LICENSE) |
 | `third_party/depth-anything-3/da3_streaming/loop_utils/salad` | [serizba/salad](https://github.com/serizba/salad) | [GNU GPL v3](https://github.com/serizba/salad/blob/6aede13a3f6c25750bf7fde10209c06cb73060bb/LICENSE) |
 | `third_party/grounded-sam-2` | [IDEA-Research/Grounded-SAM-2](https://github.com/IDEA-Research/Grounded-SAM-2) | [Apache License 2.0](https://github.com/IDEA-Research/Grounded-SAM-2/blob/b7a9c29f196edff0eb54dbe14588d7ae5e3dde28/LICENSE) |
+| Falcon Perception (optional model/code) | [tiiuae/Falcon-Perception](https://github.com/tiiuae/Falcon-Perception) | [Apache License 2.0](https://github.com/tiiuae/Falcon-Perception/blob/59a845adfac23c684bc4beafd26b380cde5ddfc1/LICENSE) |
 
 The linked files above are authoritative for the checked-out revisions. Each
 submodule may contain nested projects, datasets, assets, or model artifacts with
@@ -36,3 +37,6 @@ source code:
   source repository's Apache-2.0 license.
 - GroundingDINO and SAM2.1 artifacts remain governed by their respective
   upstream model terms.
+- Falcon Perception model exports are downloaded from Hugging Face only when the
+  optional Falcon backend is selected. The repository and published model card report
+  Apache-2.0 licensing; retain the upstream `NOTICE` when redistributing its code.

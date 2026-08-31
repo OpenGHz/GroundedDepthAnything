@@ -14,15 +14,21 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import CliApp
 
 from gda.datatypes import DetectionResult
+from gda.modules.falcon_perception import (
+    DEFAULT_FALCON_DETECTION_MODEL_ID,
+    DEFAULT_FALCON_DETECTION_MODEL_REVISION,
+    FalconPerceptionConfig,
+    FalconPerceptionRunner,
+)
 
 DEFAULT_GROUNDING_DINO_MODEL_ID = "IDEA-Research/grounding-dino-base"
 DEFAULT_GROUNDING_DINO_MODEL_REVISION = "12bdfa3120f3e7ec7b434d90674b3396eccf88eb"
@@ -39,9 +45,12 @@ def _import_grounding_dino_components():
 
 
 class ObjectDetectionConfig(BaseModel, frozen=True):
-    """Configuration for GroundingDINO detection."""
+    """Configuration for an open-vocabulary box detector."""
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
+
+    backend: Literal["grounding_dino", "falcon"] = "grounding_dino"
+    """Detector backend; Falcon uses the 300M detection-only model."""
 
     model_id: str = DEFAULT_GROUNDING_DINO_MODEL_ID
     """Hugging Face GroundingDINO repository or local model directory."""
@@ -60,6 +69,12 @@ class ObjectDetectionConfig(BaseModel, frozen=True):
 
     hf_local_files_only: bool = False
     """Require the pinned model files to exist in the local Hugging Face cache."""
+
+    falcon: FalconPerceptionConfig = FalconPerceptionConfig(
+        model_id=DEFAULT_FALCON_DETECTION_MODEL_ID,
+        model_revision=DEFAULT_FALCON_DETECTION_MODEL_REVISION,
+    )
+    """Falcon detector configuration used when backend is ``falcon``."""
 
 
 class GroundingDinoDetector:
@@ -204,10 +219,99 @@ class GroundingDinoDetector:
         return self.detect(image, prompts)
 
 
+class FalconPerceptionDetector:
+    """Detect objects with Falcon-Perception-300M text grounding."""
+
+    def __init__(self, config: ObjectDetectionConfig):
+        self.config = config
+        falcon_config = config.falcon.model_copy(
+            update={
+                "device": config.device,
+                "hf_local_files_only": config.hf_local_files_only,
+            }
+        )
+        self.runner = FalconPerceptionRunner(falcon_config)
+
+    @torch.inference_mode()
+    def detect(self, image_rgb: np.ndarray | Image.Image, prompts: list[str]) -> DetectionResult:
+        """Run Falcon once per prompt and normalize boxes to GDA's contract."""
+
+        clean_prompts = [prompt.strip() for prompt in prompts if prompt.strip()]
+        if not clean_prompts:
+            raise ValueError("prompts must be non-empty")
+        if isinstance(image_rgb, Image.Image):
+            image = image_rgb.convert("RGB")
+        else:
+            image = np.asarray(image_rgb)
+            if image.ndim != 3 or image.shape[2] != 3:
+                raise ValueError(f"image_rgb must have shape [H,W,3], got {image.shape}")
+        if isinstance(image, Image.Image):
+            height, width = image.height, image.width
+        else:
+            height, width = image.shape[:2]
+        image_size = (int(height), int(width))
+
+        boxes_parts: list[np.ndarray] = []
+        scores_parts: list[np.ndarray] = []
+        prompt_ids_parts: list[np.ndarray] = []
+        labels: list[str] = []
+        for prompt_id, prompt in enumerate(clean_prompts):
+            predictions = self.runner.generate(image_rgb, prompt, task="detection")
+            for prediction in predictions:
+                boxes_parts.append(self.runner.box(prediction, image_size)[None, :])
+                scores_parts.append(np.asarray([self.config.falcon.score], dtype=np.float32))
+                prompt_ids_parts.append(np.asarray([prompt_id], dtype=np.int32))
+                labels.append(prompt)
+
+        boxes = (
+            np.concatenate(boxes_parts, axis=0)
+            if boxes_parts
+            else np.zeros((0, 4), dtype=np.float32)
+        )
+        scores = (
+            np.concatenate(scores_parts, axis=0)
+            if scores_parts
+            else np.zeros((0,), dtype=np.float32)
+        )
+        prompt_ids = (
+            np.concatenate(prompt_ids_parts, axis=0)
+            if prompt_ids_parts
+            else np.zeros((0,), dtype=np.int32)
+        )
+        return DetectionResult(
+            image_size=image_size,
+            prompts=clean_prompts,
+            boxes_xyxy=boxes,
+            scores=scores,
+            prompt_ids=prompt_ids,
+            labels=labels,
+        )
+
+    def detect_from_path(self, image_path: str | Path, prompts: list[str]) -> DetectionResult:
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        return self.detect(Image.open(image_path).convert("RGB"), prompts)
+
+
+ObjectDetector = GroundingDinoDetector | FalconPerceptionDetector
+
+
+def build_object_detector(config: ObjectDetectionConfig) -> ObjectDetector:
+    """Instantiate the configured open-vocabulary detector."""
+
+    if config.backend == "falcon":
+        return FalconPerceptionDetector(config)
+    return GroundingDinoDetector(config)
+
+
 class ObjectDetectionArgs(BaseModel, frozen=True):
     """CLI arguments for object detection."""
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
+
+    backend: Literal["grounding_dino", "falcon"] = "grounding_dino"
+    """Detector backend."""
 
     image: Path
     """Input image path."""
@@ -227,11 +331,29 @@ class ObjectDetectionArgs(BaseModel, frozen=True):
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
     """Torch device used for detection."""
 
+    hf_local_files_only: bool = False
+    """Require the selected model files to already be cached locally."""
+
     box_th: float = 0.25
     """Minimum box confidence retained by post-processing."""
 
     text_th: float = 0.3
     """Minimum text-token confidence retained by post-processing."""
+
+    falcon_model_id: str = DEFAULT_FALCON_DETECTION_MODEL_ID
+    """Falcon-Perception-300M model repository or local export directory."""
+
+    falcon_model_revision: str | None = DEFAULT_FALCON_DETECTION_MODEL_REVISION
+    """Pinned Falcon model revision; set to null for a local directory."""
+
+    falcon_dtype: Literal["float32", "bfloat16", "float16"] = "float32"
+    """Falcon model dtype."""
+
+    falcon_compile: bool = False
+    """Compile Falcon's inference path on first use."""
+
+    falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Constant score stored for Falcon predictions without confidence output."""
 
 
 def _parse_prompts(prompts: str) -> list[str]:
@@ -323,13 +445,23 @@ def main(cli_args: list[str] | None = None) -> None:
     out_dir = _resolve_output_dir(args.image, args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    detector = GroundingDinoDetector(
+    detector = build_object_detector(
         ObjectDetectionConfig(
+            backend=args.backend,
             model_id=args.model_id,
             model_revision=args.model_revision,
             device=args.device,
             box_threshold=args.box_th,
             text_threshold=args.text_th,
+            falcon=FalconPerceptionConfig(
+                model_id=args.falcon_model_id,
+                model_revision=args.falcon_model_revision,
+                device=args.device,
+                dtype=args.falcon_dtype,
+                compile=args.falcon_compile,
+                score=args.falcon_score,
+                hf_local_files_only=args.hf_local_files_only,
+            ),
         )
     )
 

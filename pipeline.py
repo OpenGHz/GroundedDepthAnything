@@ -41,6 +41,13 @@ from gda.modules.depth_estimation import (
     DepthEstimationConfig,
     DepthEstimatorDA3,
 )
+from gda.modules.falcon_perception import (
+    DEFAULT_FALCON_DETECTION_MODEL_ID,
+    DEFAULT_FALCON_DETECTION_MODEL_REVISION,
+    DEFAULT_FALCON_PERCEPTION_MODEL_ID,
+    DEFAULT_FALCON_PERCEPTION_MODEL_REVISION,
+    FalconPerceptionConfig,
+)
 from gda.modules.grounded_segmentation import (
     DEFAULT_SAM3_MODEL_REVISION,
     AutocastDtype,
@@ -189,6 +196,24 @@ class GDAArgs(BaseModel, frozen=True):
     text_th: float = Field(default=0.3, ge=0.0, le=1.0)
     """GroundingDINO text threshold."""
 
+    det_backend: Literal["grounding_dino", "falcon"] = "grounding_dino"
+    """Detector backend used by the ``sam2`` chain."""
+
+    det_falcon_model_id: str = DEFAULT_FALCON_DETECTION_MODEL_ID
+    """Falcon-Perception-300M detector model repository or local export."""
+
+    det_falcon_model_revision: str | None = DEFAULT_FALCON_DETECTION_MODEL_REVISION
+    """Pinned Falcon detector revision; set to null for a local directory."""
+
+    det_falcon_dtype: Literal["float32", "bfloat16", "float16"] = "float32"
+    """Falcon detector model dtype."""
+
+    det_falcon_compile: bool = False
+    """Compile the Falcon detector path on first use."""
+
+    det_falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Constant detector score stored for Falcon predictions."""
+
     seg_backend: GroundedBackend = "sam3"
     """Use native SAM3 or the GroundingDINO+SAM2.1 baseline."""
 
@@ -230,6 +255,21 @@ class GDAArgs(BaseModel, frozen=True):
 
     sam3_deduplicate_mask_iou: float | None = Field(default=0.9, gt=0.0, le=1.0)
     """Cross-prompt SAM3 duplicate suppression threshold."""
+
+    falcon_model_id: str = DEFAULT_FALCON_PERCEPTION_MODEL_ID
+    """Falcon full perception model repository or local export."""
+
+    falcon_model_revision: str | None = DEFAULT_FALCON_PERCEPTION_MODEL_REVISION
+    """Pinned Falcon segmentation revision; set to null for a local directory."""
+
+    falcon_dtype: Literal["float32", "bfloat16", "float16"] = "float32"
+    """Falcon segmentation model dtype."""
+
+    falcon_compile: bool = False
+    """Compile Falcon segmentation on first use."""
+
+    falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Constant segmentation score stored for Falcon predictions."""
 
 
 def _parse_prompts(prompts: str) -> list[str]:
@@ -323,12 +363,22 @@ def main(cli_args: list[str] | None = None) -> None:
             backend=args.seg_backend,
             grounded_sam2=GroundingDinoSam2Config(
                 detector=ObjectDetectionConfig(
+                    backend=args.det_backend,
                     model_id=args.det_model_id,
                     model_revision=args.det_model_revision,
                     device=args.device,
                     box_threshold=args.box_th,
                     text_threshold=args.text_th,
                     hf_local_files_only=local_files_only,
+                    falcon=FalconPerceptionConfig(
+                        model_id=args.det_falcon_model_id,
+                        model_revision=args.det_falcon_model_revision,
+                        device=args.device,
+                        dtype=args.det_falcon_dtype,
+                        compile=args.det_falcon_compile,
+                        score=args.det_falcon_score,
+                        hf_local_files_only=local_files_only,
+                    ),
                 ),
                 segmentor=ObjectSegmentationConfig(**sam2_config_kwargs),
             ),
@@ -345,6 +395,15 @@ def main(cli_args: list[str] | None = None) -> None:
                 compile=args.sam3_compile,
                 autocast_dtype=args.sam3_autocast_dtype,
                 deduplicate_mask_iou=args.sam3_deduplicate_mask_iou,
+            ),
+            falcon=FalconPerceptionConfig(
+                model_id=args.falcon_model_id,
+                model_revision=args.falcon_model_revision,
+                device=args.device,
+                dtype=args.falcon_dtype,
+                compile=args.falcon_compile,
+                score=args.falcon_score,
+                hf_local_files_only=local_files_only,
             ),
         ),
     )

@@ -24,12 +24,20 @@ from gda.datatypes import (
     GroundedSegmentationResult,
     SegmentationResult,
 )
+from gda.modules.falcon_perception import (
+    DEFAULT_FALCON_DETECTION_MODEL_ID,
+    DEFAULT_FALCON_DETECTION_MODEL_REVISION,
+    DEFAULT_FALCON_PERCEPTION_MODEL_ID,
+    DEFAULT_FALCON_PERCEPTION_MODEL_REVISION,
+    FalconPerceptionConfig,
+    FalconPerceptionRunner,
+)
 from gda.modules.object_detection import (
     DEFAULT_GROUNDING_DINO_MODEL_ID,
     DEFAULT_GROUNDING_DINO_MODEL_REVISION,
-    GroundingDinoDetector,
     ObjectDetectionConfig,
     _draw_boxes,
+    build_object_detector,
 )
 from gda.modules.object_segmentation import (
     _DEFAULT_SAM2_CHECKPOINT,
@@ -48,7 +56,7 @@ from gda.modules.workspace import third_party_root
 
 _THIRD_PARTY_ROOT = third_party_root()
 
-GroundedBackend = Literal["sam2", "sam3"]
+GroundedBackend = Literal["sam2", "sam3", "falcon"]
 AutocastDtype = Literal["none", "bfloat16", "float16"]
 DEFAULT_SAM3_MODEL_REVISION = DEFAULT_SAM3_HUGGINGFACE_REVISION
 
@@ -154,13 +162,19 @@ class GroundedSegmentationConfig(BaseModel, frozen=True):
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     backend: GroundedBackend = "sam3"
-    """Use the stable GroundingDINO+SAM2 chain or native SAM3 concept segmentation."""
+    """Select SAM2, SAM3, or Falcon concept segmentation."""
 
     grounded_sam2: GroundingDinoSam2Config = GroundingDinoSam2Config()
     """Configuration used when backend is sam2."""
 
     sam3: Sam3ConceptSegmentationConfig = Sam3ConceptSegmentationConfig()
     """Configuration used when backend is sam3."""
+
+    falcon: FalconPerceptionConfig = FalconPerceptionConfig(
+        model_id=DEFAULT_FALCON_PERCEPTION_MODEL_ID,
+        model_revision=DEFAULT_FALCON_PERCEPTION_MODEL_REVISION,
+    )
+    """Falcon Perception configuration used when backend is falcon."""
 
 
 class GroundedSegmentor(Protocol):
@@ -176,7 +190,7 @@ class GroundingDinoSam2Segmentor:
 
     def __init__(self, config: GroundingDinoSam2Config):
         self.config = config
-        self.detector = GroundingDinoDetector(config.detector)
+        self.detector = build_object_detector(config.detector)
         self.segmentor = Sam2BoxSegmentor(config.segmentor)
 
     def segment(
@@ -389,11 +403,88 @@ class Sam3ConceptSegmentor:
         )
 
 
+class FalconConceptSegmentor:
+    """Run Falcon Perception text-to-instance-mask inference."""
+
+    def __init__(self, config: FalconPerceptionConfig):
+        self.config = config
+        self.runner = FalconPerceptionRunner(config)
+
+    @torch.inference_mode()
+    def segment(
+        self, image_rgb: np.ndarray | Image.Image, prompts: list[str]
+    ) -> GroundedSegmentationResult:
+        clean_prompts = [prompt.strip() for prompt in prompts if prompt.strip()]
+        if not clean_prompts:
+            raise ValueError("prompts must be non-empty")
+
+        image = _as_rgb_array(image_rgb)
+        height, width = image.shape[:2]
+        image_size = (height, width)
+        boxes_parts: list[np.ndarray] = []
+        scores_parts: list[np.ndarray] = []
+        masks_parts: list[np.ndarray] = []
+        prompt_ids_parts: list[np.ndarray] = []
+        labels: list[str] = []
+
+        for prompt_id, prompt in enumerate(clean_prompts):
+            predictions = self.runner.generate(image, prompt, task="segmentation")
+            for prediction in predictions:
+                if "mask_rle" not in prediction:
+                    raise RuntimeError("Falcon segmentation prediction has no mask_rle")
+                boxes_parts.append(self.runner.box(prediction, image_size)[None, :])
+                masks_parts.append(self.runner.mask(prediction, image_size)[None, ...])
+                scores_parts.append(np.asarray([self.config.score], dtype=np.float32))
+                prompt_ids_parts.append(np.asarray([prompt_id], dtype=np.int32))
+                labels.append(prompt)
+
+        boxes = (
+            np.concatenate(boxes_parts, axis=0)
+            if boxes_parts
+            else np.zeros((0, 4), dtype=np.float32)
+        )
+        scores = (
+            np.concatenate(scores_parts, axis=0)
+            if scores_parts
+            else np.zeros((0,), dtype=np.float32)
+        )
+        masks = (
+            np.concatenate(masks_parts, axis=0)
+            if masks_parts
+            else np.zeros((0, height, width), dtype=bool)
+        )
+        prompt_ids = (
+            np.concatenate(prompt_ids_parts, axis=0)
+            if prompt_ids_parts
+            else np.zeros((0,), dtype=np.int32)
+        )
+        det = DetectionResult(
+            image_size=image_size,
+            prompts=clean_prompts,
+            boxes_xyxy=boxes,
+            scores=scores,
+            prompt_ids=prompt_ids,
+            labels=labels,
+        )
+        seg = SegmentationResult(
+            backend="falcon",
+            image_size=image_size,
+            prompts=clean_prompts,
+            boxes_xyxy=boxes,
+            prompt_ids=prompt_ids,
+            scores=scores,
+            masks=masks,
+        )
+        return GroundedSegmentationResult(det=det, seg=seg)
+
+
 def build_grounded_segmentor(config: GroundedSegmentationConfig) -> GroundedSegmentor:
     """Instantiate the selected grounded segmentation backend."""
 
     if config.backend == "sam3":
         return Sam3ConceptSegmentor(config.sam3)
+    if config.backend == "falcon":
+        return FalconConceptSegmentor(config.falcon)
     return GroundingDinoSam2Segmentor(config.grounded_sam2)
 
 
@@ -431,6 +522,24 @@ class GroundedSegmentationArgs(BaseModel, frozen=True):
 
     text_th: float = Field(default=0.3, ge=0.0, le=1.0)
     """GroundingDINO text threshold."""
+
+    det_backend: Literal["grounding_dino", "falcon"] = "grounding_dino"
+    """Detector backend used by the ``sam2`` chain."""
+
+    det_falcon_model_id: str = DEFAULT_FALCON_DETECTION_MODEL_ID
+    """Falcon-Perception-300M detector model repository or local export."""
+
+    det_falcon_model_revision: str | None = DEFAULT_FALCON_DETECTION_MODEL_REVISION
+    """Pinned Falcon detector revision; set to null for a local directory."""
+
+    det_falcon_dtype: Literal["float32", "bfloat16", "float16"] = "float32"
+    """Falcon detector model dtype."""
+
+    det_falcon_compile: bool = False
+    """Compile the Falcon detector path on first use."""
+
+    det_falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Constant detector score stored for Falcon predictions."""
 
     sam2_checkpoint: Path = _DEFAULT_SAM2_CHECKPOINT
     """SAM2.1 checkpoint used by the SAM2 backend."""
@@ -471,6 +580,21 @@ class GroundedSegmentationArgs(BaseModel, frozen=True):
     sam3_deduplicate_mask_iou: float | None = Field(default=0.9, gt=0.0, le=1.0)
     """Cross-prompt SAM3 duplicate suppression threshold."""
 
+    falcon_model_id: str = DEFAULT_FALCON_PERCEPTION_MODEL_ID
+    """Falcon full perception model repository or local export."""
+
+    falcon_model_revision: str | None = DEFAULT_FALCON_PERCEPTION_MODEL_REVISION
+    """Pinned Falcon segmentation revision; set to null for a local directory."""
+
+    falcon_dtype: Literal["float32", "bfloat16", "float16"] = "float32"
+    """Falcon segmentation model dtype."""
+
+    falcon_compile: bool = False
+    """Compile Falcon segmentation on first use."""
+
+    falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Constant segmentation score stored for Falcon predictions."""
+
 
 def _parse_prompts(value: str) -> list[str]:
     return [item.strip() for item in re.split(r"[;,\n]+", value) if item.strip()]
@@ -490,12 +614,22 @@ def main(cli_args: list[str] | None = None) -> None:
         backend=args.backend,
         grounded_sam2=GroundingDinoSam2Config(
             detector=ObjectDetectionConfig(
+                backend=args.det_backend,
                 model_id=args.det_model_id,
                 model_revision=args.det_model_revision,
                 device=args.device,
                 box_threshold=args.box_th,
                 text_threshold=args.text_th,
                 hf_local_files_only=args.hf_offline,
+                falcon=FalconPerceptionConfig(
+                    model_id=args.det_falcon_model_id,
+                    model_revision=args.det_falcon_model_revision,
+                    device=args.device,
+                    dtype=args.det_falcon_dtype,
+                    compile=args.det_falcon_compile,
+                    score=args.det_falcon_score,
+                    hf_local_files_only=args.hf_offline,
+                ),
             ),
             segmentor=ObjectSegmentationConfig(
                 device=args.device,
@@ -517,6 +651,15 @@ def main(cli_args: list[str] | None = None) -> None:
             compile=args.sam3_compile,
             autocast_dtype=args.sam3_autocast_dtype,
             deduplicate_mask_iou=args.sam3_deduplicate_mask_iou,
+        ),
+        falcon=FalconPerceptionConfig(
+            model_id=args.falcon_model_id,
+            model_revision=args.falcon_model_revision,
+            device=args.device,
+            dtype=args.falcon_dtype,
+            compile=args.falcon_compile,
+            score=args.falcon_score,
+            hf_local_files_only=args.hf_offline,
         ),
     )
     image = Image.open(args.image).convert("RGB")

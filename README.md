@@ -5,6 +5,11 @@ GDA combines text-grounded instance segmentation, monocular depth estimation, an
 text-to-mask inference. The previous GroundingDINO -> SAM2.1 box-to-mask chain is
 kept as an explicit fallback.
 
+Falcon Perception is an optional Hugging Face backend for open-vocabulary detection
+and text-to-instance-mask segmentation. It is not loaded by default. Select it with
+`--backend falcon` (segmentation or `gda-detect`), or use its 300M detection model
+inside the SAM2 chain with `--det-backend falcon`.
+
 The locked Pixi environments target Linux and Python 3.12. H200 uses CUDA 12.8
 (`sm_90`); B300 uses CUDA 13.0 (`sm_103`) with the matching PyTorch `cu130`
 wheels. GDA owns its required source dependencies as Git submodules:
@@ -188,6 +193,34 @@ pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
   --backend sam2 \
   --output-dir outputs/seg_sam2
 ```
+
+Run Falcon Perception segmentation:
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
+  --image third_party/sam3/assets/images/truck.jpg \
+  --prompts "truck" \
+  --backend falcon \
+  --output-dir outputs/seg_falcon
+```
+
+Run Falcon-Perception-300M as a standalone detector:
+
+```bash
+pixi run --platform "$GDA_PIXI_PLATFORM" --locked gda-detect \
+  --image third_party/sam3/assets/images/truck.jpg \
+  --prompts "truck" \
+  --backend falcon \
+  --output-dir outputs/det_falcon
+```
+
+To use Falcon-Perception-300M before SAM2, add `--det-backend falcon` to the
+SAM2 command above.
+
+Falcon predictions do not include calibrated instance confidence. GDA keeps the
+common contract by storing a configurable constant score (default `1.0`), which must
+not be interpreted as a probability. Falcon model files are downloaded from
+Hugging Face and are not bundled in the repository.
 
 Run depth estimation together with grounded segmentation:
 
