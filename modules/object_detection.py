@@ -355,6 +355,9 @@ class ObjectDetectionArgs(BaseModel, frozen=True):
     falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
     """Constant score stored for Falcon predictions without confidence output."""
 
+    falcon_flex_attention_safe: bool = False
+    """Force conservative Falcon FlexAttention tiles."""
+
 
 def _parse_prompts(prompts: str) -> list[str]:
     """Parse prompts string into a list.
@@ -460,6 +463,7 @@ def main(cli_args: list[str] | None = None) -> None:
                 dtype=args.falcon_dtype,
                 compile=args.falcon_compile,
                 score=args.falcon_score,
+                flex_attention_safe=args.falcon_flex_attention_safe,
                 hf_local_files_only=args.hf_local_files_only,
             ),
         )

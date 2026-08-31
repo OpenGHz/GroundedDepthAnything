@@ -214,6 +214,9 @@ class GDAArgs(BaseModel, frozen=True):
     det_falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
     """Constant detector score stored for Falcon predictions."""
 
+    det_falcon_flex_attention_safe: bool = False
+    """Force conservative Falcon detector FlexAttention tiles."""
+
     seg_backend: GroundedBackend = "sam3"
     """Use native SAM3 or the GroundingDINO+SAM2.1 baseline."""
 
@@ -270,6 +273,15 @@ class GDAArgs(BaseModel, frozen=True):
 
     falcon_score: float = Field(default=1.0, ge=0.0, le=1.0)
     """Constant segmentation score stored for Falcon predictions."""
+
+    falcon_flex_attention_safe: bool = False
+    """Force conservative Falcon segmentation FlexAttention tiles."""
+
+    falcon_min_image_size: int = Field(default=256, gt=0)
+    """Minimum image side passed to Falcon segmentation preprocessing."""
+
+    falcon_max_image_size: int = Field(default=1024, gt=0)
+    """Maximum image side passed to Falcon segmentation preprocessing."""
 
 
 def _parse_prompts(prompts: str) -> list[str]:
@@ -377,6 +389,7 @@ def main(cli_args: list[str] | None = None) -> None:
                         dtype=args.det_falcon_dtype,
                         compile=args.det_falcon_compile,
                         score=args.det_falcon_score,
+                        flex_attention_safe=args.det_falcon_flex_attention_safe,
                         hf_local_files_only=local_files_only,
                     ),
                 ),
@@ -403,6 +416,9 @@ def main(cli_args: list[str] | None = None) -> None:
                 dtype=args.falcon_dtype,
                 compile=args.falcon_compile,
                 score=args.falcon_score,
+                flex_attention_safe=args.falcon_flex_attention_safe,
+                min_image_size=args.falcon_min_image_size,
+                max_image_size=args.falcon_max_image_size,
                 hf_local_files_only=local_files_only,
             ),
         ),

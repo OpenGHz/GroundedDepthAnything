@@ -69,6 +69,8 @@ def test_falcon_runner_passes_pinned_revision_and_generation_options(monkeypatch
         device="cpu",
         compile=False,
         max_new_tokens=64,
+        min_image_size=128,
+        max_image_size=512,
     )
     runner = falcon.FalconPerceptionRunner(config)
     output = runner.generate(Image.new("RGB", (8, 6)), "cup", task="detection")
@@ -86,6 +88,8 @@ def test_falcon_runner_passes_pinned_revision_and_generation_options(monkeypatch
     assert generate_call["query"] == "cup"
     assert generate_call["task"] == "detection"
     assert generate_call["max_new_tokens"] == 64
+    assert generate_call["min_dimension"] == 128
+    assert generate_call["max_dimension"] == 512
     assert generate_call["compile"] is False
 
 

@@ -9,6 +9,7 @@ the detector and grounded-segmentation adapters.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
 import logging
@@ -28,6 +29,12 @@ DEFAULT_FALCON_DETECTION_MODEL_ID = "tiiuae/Falcon-Perception-300M"
 DEFAULT_FALCON_DETECTION_MODEL_REVISION = "36993684b3ba5945b22d01e705f8ff2e048bf0b0"
 
 FalconDtype = Literal["float32", "bfloat16", "float16"]
+
+_SAFE_FLEX_ATTENTION_OPTIONS = {
+    "BLOCK_M": 64,
+    "BLOCK_N": 64,
+    "num_stages": 1,
+}
 
 
 class FalconPerceptionConfig(BaseModel, frozen=True):
@@ -67,6 +74,9 @@ class FalconPerceptionConfig(BaseModel, frozen=True):
 
     score: float = Field(default=1.0, ge=0.0, le=1.0)
     """Fallback score because Falcon's public output has no confidence field."""
+
+    flex_attention_safe: bool = False
+    """Use conservative FlexAttention tiles for GPUs with limited shared memory."""
 
 
 def _import_falcon_model():
@@ -164,6 +174,33 @@ def _resolve_falcon_export(config: FalconPerceptionConfig) -> Path:
     return export_dir
 
 
+def _configure_falcon_attention(model: Any, *, safe: bool) -> None:
+    """Patch Falcon's prefill FlexAttention with safe Triton tile sizes.
+
+    The upstream remote model currently accepts ``flex_attn_kernel_options`` in
+    layer signatures but does not forward it to ``flex_attention``.  Replacing
+    its imported prefill callable keeps this workaround local to GDA and avoids
+    editing the Hugging Face cache.  The safe tiles are needed on RTX 30/40 and
+    similar GPUs whose shared-memory limit is below the upstream default.
+    """
+
+    if not safe:
+        return
+    try:
+        modeling_module = importlib.import_module(model.__class__.__module__)
+        from torch.nn.attention.flex_attention import flex_attention
+    except (ImportError, AttributeError):  # pragma: no cover - remote-code variant
+        return
+
+    safe_options = dict(_SAFE_FLEX_ATTENTION_OPTIONS)
+
+    def safe_prefill(*args, **kwargs):
+        kwargs["kernel_options"] = safe_options
+        return flex_attention(*args, **kwargs)
+
+    modeling_module.compiled_flex_attn_prefill = torch.compile(safe_prefill, dynamic=True)
+
+
 def _as_rgb_image(image_rgb: np.ndarray | Image.Image) -> Image.Image:
     if isinstance(image_rgb, Image.Image):
         return image_rgb.convert("RGB")
@@ -251,6 +288,15 @@ class FalconPerceptionRunner:
         self.model = model_type.from_pretrained(str(export_dir), **kwargs)
         # Avoid AutoTokenizer's unsupported ``TokenizersBackend`` declaration.
         self.model._tokenizer = _FalconTokenizer(export_dir)
+        safe_attention = config.flex_attention_safe
+        if not safe_attention and self.device.type == "cuda":
+            # Auto-enable the conservative path below Hopper-class GPUs.  The
+            # upstream default can exceed Ampere's 99 KiB shared-memory limit.
+            try:
+                safe_attention = torch.cuda.get_device_capability(self.device)[0] < 9
+            except (RuntimeError, AssertionError):
+                safe_attention = False
+        _configure_falcon_attention(self.model, safe=safe_attention)
         self.model = self.model.to(self.device).eval()
         logger.info("Falcon model ready in %.2fs", time.perf_counter() - started)
 
