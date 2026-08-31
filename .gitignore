@@ -9,3 +9,4 @@ dist/
 .agents/
 AGENTS.md
 test_images/
+outputs/
