@@ -222,6 +222,10 @@ common contract by storing a configurable constant score (default `1.0`), which 
 not be interpreted as a probability. Falcon model files are downloaded from
 Hugging Face and are not bundled in the repository.
 
+On older consumer GPUs such as RTX 30-series, prefer `--falcon-dtype float32` for
+Falcon detection/segmentation. Some float16 kernels can silently produce no instances;
+float32 is the safe default for correctness.
+
 Run depth estimation together with grounded segmentation:
 
 ```bash

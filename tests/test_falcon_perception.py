@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from PIL import Image
@@ -38,6 +40,7 @@ def _prediction(*, x=0.5, y=0.5, h=0.2, w=0.4, mask=None):
 
 def test_falcon_runner_passes_pinned_revision_and_generation_options(monkeypatch):
     calls: list[tuple[str, dict]] = []
+    export_dir = Path(__file__).parent / "_fake_falcon_export"
 
     class FakeModel:
         def to(self, device):
@@ -58,6 +61,8 @@ def test_falcon_runner_passes_pinned_revision_and_generation_options(monkeypatch
             return FakeModel()
 
     monkeypatch.setattr(falcon, "_import_falcon_model", lambda: FakeAutoModel)
+    monkeypatch.setattr(falcon, "_resolve_falcon_export", lambda config: export_dir)
+    monkeypatch.setattr(falcon, "_FalconTokenizer", lambda export_dir: object())
     config = falcon.FalconPerceptionConfig(
         model_id="tiiuae/test-falcon",
         model_revision="pinned-revision",
@@ -70,12 +75,11 @@ def test_falcon_runner_passes_pinned_revision_and_generation_options(monkeypatch
 
     assert len(output) == 1
     assert calls[0] == (
-        "tiiuae/test-falcon",
+        str(export_dir),
         {
             "trust_remote_code": True,
             "local_files_only": False,
-            "revision": "pinned-revision",
-            "torch_dtype": torch.float32,
+            "dtype": torch.float32,
         },
     )
     _, generate_call = calls[1]
@@ -103,6 +107,9 @@ def test_falcon_runner_omits_task_for_full_model_signature(monkeypatch):
             return FakeModel()
 
     monkeypatch.setattr(falcon, "_import_falcon_model", lambda: FakeAutoModel)
+    export_dir = Path(__file__).parent / "_fake_falcon_export"
+    monkeypatch.setattr(falcon, "_resolve_falcon_export", lambda config: export_dir)
+    monkeypatch.setattr(falcon, "_FalconTokenizer", lambda export_dir: object())
     runner = falcon.FalconPerceptionRunner(
         falcon.FalconPerceptionConfig(model_id="local", model_revision=None, device="cpu")
     )

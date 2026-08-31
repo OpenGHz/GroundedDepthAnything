@@ -206,6 +206,9 @@ Falcon 公开输出没有实例置信度，GDA 的 `scores` 使用配置中的�
 1.0），不应将其解释为校准概率。也可以在旧链路中用 Falcon-Perception-300M
 替换 GroundingDINO 前端：
 
+在 RTX 30 系列等消费级 GPU 上建议使用 `--falcon-dtype float32`；实测部分
+float16 kernel 可能静默返回空结果。
+
 ```bash
 pixi run --platform "$GDA_PIXI_PLATFORM" --locked segment \
   --image third_party/sam3/assets/images/truck.jpg \

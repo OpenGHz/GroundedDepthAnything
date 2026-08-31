@@ -10,8 +10,10 @@ the detector and grounded-segmentation adapters.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -75,6 +77,91 @@ def _import_falcon_model():
     except ImportError as exc:  # pragma: no cover - optional heavyweight runtime
         raise ImportError("Falcon Perception requires Transformers. Run `pixi install`.") from exc
     return AutoModelForCausalLM
+
+
+class _FalconTokenizer:
+    """Small tokenizer adapter required by Falcon's custom model code.
+
+    Falcon exports a Rust ``tokenizers`` tokenizer but currently declares the
+    Transformers class name ``TokenizersBackend``.  That class is not shipped
+    by the installed Transformers release, so using ``AutoTokenizer`` fails
+    before inference starts.  Falcon's processing code only needs this small
+    subset of the tokenizer API.
+    """
+
+    def __init__(self, export_dir: Path):
+        from tokenizers import Tokenizer
+
+        self._tok = Tokenizer.from_file(str(export_dir / "tokenizer.json"))
+        config_path = export_dir / "tokenizer_config.json"
+        config = (
+            json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+        )
+        special_tokens = dict(config.get("model_specific_special_tokens", {}))
+        for name in (
+            "eos_token",
+            "bos_token",
+            "pad_token",
+        ):
+            if name in config and isinstance(config[name], str):
+                special_tokens.setdefault(name, config[name])
+        self.special_tokens_map = {
+            name: token for name, token in special_tokens.items() if isinstance(token, str)
+        }
+        for name, token in self.special_tokens_map.items():
+            setattr(self, name, token)
+            setattr(self, f"{name}_id", self.convert_tokens_to_ids(token))
+        self.eos_token_id = self.convert_tokens_to_ids(config.get("eos_token", "<|end_of_text|>"))
+        self.bos_token_id = (
+            self.convert_tokens_to_ids(config["bos_token"])
+            if isinstance(config.get("bos_token"), str)
+            else None
+        )
+        self.pad_token_id = self.convert_tokens_to_ids(config.get("pad_token", "<|pad|>"))
+
+    def encode(self, text: str) -> list[int]:
+        return self._tok.encode(text).ids
+
+    def convert_tokens_to_ids(self, token: str) -> int | None:
+        return self._tok.token_to_id(token)
+
+    def convert_ids_to_tokens(self, token_id: int) -> str | None:
+        return self._tok.id_to_token(int(token_id))
+
+
+def _resolve_falcon_export(config: FalconPerceptionConfig) -> Path:
+    """Resolve a local model export, downloading a pinned HF snapshot if needed."""
+
+    local_path = Path(config.model_id).expanduser()
+    if local_path.is_dir():
+        return local_path
+    try:
+        from huggingface_hub import hf_hub_download, snapshot_download
+    except ImportError as exc:  # pragma: no cover - dependency is project-pinned
+        raise ImportError(
+            "Falcon Perception requires huggingface-hub. Run `pixi install`."
+        ) from exc
+
+    kwargs: dict[str, Any] = {
+        "repo_id": config.model_id,
+        "repo_type": "model",
+        "local_files_only": bool(config.hf_local_files_only),
+    }
+    if config.model_revision is not None:
+        kwargs["revision"] = config.model_revision
+    export_dir = Path(snapshot_download(**kwargs))
+    tokenizer_path = export_dir / "tokenizer.json"
+    if not tokenizer_path.exists():
+        tokenizer_kwargs: dict[str, Any] = {
+            "repo_id": config.model_id,
+            "filename": "tokenizer.json",
+            "local_files_only": bool(config.hf_local_files_only),
+            "local_dir": str(export_dir),
+        }
+        if config.model_revision is not None:
+            tokenizer_kwargs["revision"] = config.model_revision
+        hf_hub_download(**tokenizer_kwargs)
+    return export_dir
 
 
 def _as_rgb_image(image_rgb: np.ndarray | Image.Image) -> Image.Image:
@@ -149,20 +236,21 @@ class FalconPerceptionRunner:
         self.config = config
         self.device = torch.device(config.device)
         model_type = _import_falcon_model()
+        export_dir = _resolve_falcon_export(config)
         dtype = getattr(torch, config.dtype)
         kwargs: dict[str, Any] = {
             "trust_remote_code": True,
             "local_files_only": bool(config.hf_local_files_only),
         }
-        if config.model_revision is not None:
-            kwargs["revision"] = config.model_revision
         if dtype is not None:
-            kwargs["torch_dtype"] = dtype
+            kwargs["dtype"] = dtype
 
         logger = logging.getLogger("gda.falcon")
         logger.info("loading Falcon model=%s device=%s", config.model_id, config.device)
         started = time.perf_counter()
-        self.model = model_type.from_pretrained(config.model_id, **kwargs)
+        self.model = model_type.from_pretrained(str(export_dir), **kwargs)
+        # Avoid AutoTokenizer's unsupported ``TokenizersBackend`` declaration.
+        self.model._tokenizer = _FalconTokenizer(export_dir)
         self.model = self.model.to(self.device).eval()
         logger.info("Falcon model ready in %.2fs", time.perf_counter() - started)
 
